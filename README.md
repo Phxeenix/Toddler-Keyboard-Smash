@@ -1,5 +1,11 @@
 # Toddler Keyboard Smash
 
+## Download
+
+**[Download the latest .exe from Releases](https://github.com/Phxeenix/Toddler-Keyboard-Smash/releases/latest)** — no Python required, just download and run.
+
+> **Windows SmartScreen note:** Because the app isn't signed, Windows may show a "Windows protected your PC" warning. Click **More info** then **Run anyway** to proceed — this is normal for indie apps.
+
 A safe, fullscreen keyboard playground for toddlers. Every keypress triggers satisfying sounds and colorful visuals — no risk of accidentally closing windows, opening apps, or messing with system settings.
 
 ---
