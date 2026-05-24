@@ -2108,6 +2108,17 @@ class KeyboardLockdown:
             return
         if pygame_key == pygame.K_ESCAPE:
             return
+        # Dev-mode HUD / stress-test keys bypass the theme queue and are
+        # surfaced directly to pygame's event queue so the main loop's
+        # KEYDOWN handlers fire as they would in SETUP.
+        if IS_DEV_MODE and pygame_key in (pygame.K_F7, pygame.K_F8, pygame.K_F9):
+            try:
+                pygame.event.post(
+                    pygame.event.Event(pygame.KEYDOWN, {"key": pygame_key})
+                )
+            except pygame.error:
+                pass
+            return
         if combo_held and _is_unlock_combo_key_name(name):
             return
         self._queue.put(pygame_key)
