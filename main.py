@@ -74,6 +74,12 @@ class DevState:
 # Module-level singleton; populated in main() only when IS_DEV_MODE is True.
 DEV_STATE: DevState | None = None
 
+# Palette hot-reload — written to and read from ./dev_palette.json. Allows
+# live tuning of aurora, music ripple, and emoji confetti colors without
+# restarting. mtime is polled at most once every DEV_PALETTE_POLL_SEC.
+DEV_PALETTE_PATH = Path(__file__).resolve().parent / "dev_palette.json"
+DEV_PALETTE_POLL_SEC = 0.5
+
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -244,6 +250,155 @@ PITCH_SHIFT_MAX = 1.2   # +20 %
 NOTE_SOUNDS: list[pygame.mixer.Sound] = []
 POP_WAVE: np.ndarray | None = None
 CURRENT_PLAY_VOLUME = DEFAULT_VOLUME  # updated by apply_session_volume()
+
+
+# -----------------------------------------------------------------------------
+# Dev palette hot-reload (dev mode only)
+# -----------------------------------------------------------------------------
+
+
+def _coerce_rgb_list(
+    raw: Any, fallback: tuple[tuple[int, int, int], ...]
+) -> tuple[tuple[int, int, int], ...]:
+    """Validate raw → tuple of (r,g,b); fall back if any entry is malformed."""
+    if not isinstance(raw, list) or not raw:
+        return fallback
+    out: list[tuple[int, int, int]] = []
+    for entry in raw:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+            return fallback
+        try:
+            r, g, b = (int(entry[0]), int(entry[1]), int(entry[2]))
+        except (TypeError, ValueError):
+            return fallback
+        if not (0 <= r <= 255 and 0 <= g <= 255 and 0 <= b <= 255):
+            return fallback
+        out.append((r, g, b))
+    return tuple(out)
+
+
+def _default_dev_palette_payload() -> dict[str, Any]:
+    """Seed JSON values from the current Montessori-tuned constants."""
+    return {
+        "_comment": (
+            "Edit RGB triplets and save; changes apply within ~1s. "
+            "Delete this file to regenerate defaults."
+        ),
+        "aurora": [list(c) for c in AURORA_COLORS],
+        "music_palette": [list(c) for c in MUSIC_THEME_PALETTE],
+        "emoji_confetti": [list(c) for c in EMOJI_CONFETTI_PALETTE],
+    }
+
+
+def _write_dev_palette_atomic(payload: dict[str, Any]) -> None:
+    """Write JSON via temp file + os.replace so a torn write never sticks."""
+    tmp = DEV_PALETTE_PATH.with_suffix(".json.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, indent=2)
+            file.write("\n")
+        os.replace(tmp, DEV_PALETTE_PATH)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _read_dev_palette() -> dict[str, tuple[tuple[int, int, int], ...]] | None:
+    """Read the palette file; return None on missing/corrupt."""
+    try:
+        with DEV_PALETTE_PATH.open(encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {
+        "aurora": _coerce_rgb_list(data.get("aurora"), AURORA_COLORS),
+        "music_palette": _coerce_rgb_list(
+            data.get("music_palette"), MUSIC_THEME_PALETTE
+        ),
+        "emoji_confetti": _coerce_rgb_list(
+            data.get("emoji_confetti"), EMOJI_CONFETTI_PALETTE
+        ),
+    }
+
+
+def poll_dev_palette(dt: float) -> None:
+    """
+    Called once per frame from the game loop. Polls the palette file's mtime
+    at most every DEV_PALETTE_POLL_SEC; on change, reloads into DEV_STATE.
+    No-op outside dev mode.
+    """
+    if not IS_DEV_MODE or DEV_STATE is None:
+        return
+    # The accumulator lives on DEV_STATE so we don't add a global.
+    acc = DEV_STATE.palette_overrides.get("_acc", 0.0)
+    if not isinstance(acc, float):
+        acc = 0.0
+    acc += dt
+    if acc < DEV_PALETTE_POLL_SEC:
+        DEV_STATE.palette_overrides["_acc"] = acc
+        return
+    DEV_STATE.palette_overrides["_acc"] = 0.0
+
+    try:
+        mtime = DEV_PALETTE_PATH.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    if mtime == DEV_STATE.palette_mtime:
+        return
+    parsed = _read_dev_palette()
+    if parsed is None:
+        return
+    DEV_STATE.palette_overrides.update(parsed)
+    DEV_STATE.palette_mtime = mtime
+    _dev_log(f"palette reloaded from {DEV_PALETTE_PATH.name}")
+
+
+def init_dev_palette() -> None:
+    """First-run: write defaults if file missing, then load into DEV_STATE."""
+    if not IS_DEV_MODE or DEV_STATE is None:
+        return
+    if not DEV_PALETTE_PATH.exists():
+        _write_dev_palette_atomic(_default_dev_palette_payload())
+        _dev_log(f"wrote default palette to {DEV_PALETTE_PATH.name}")
+    parsed = _read_dev_palette()
+    if parsed is None:
+        return
+    DEV_STATE.palette_overrides.update(parsed)
+    try:
+        DEV_STATE.palette_mtime = DEV_PALETTE_PATH.stat().st_mtime
+    except OSError:
+        DEV_STATE.palette_mtime = 0.0
+
+
+def get_aurora_colors() -> tuple[tuple[int, int, int], ...]:
+    """Live aurora colors (dev override falls through to baked constant)."""
+    if IS_DEV_MODE and DEV_STATE is not None:
+        override = DEV_STATE.palette_overrides.get("aurora")
+        if isinstance(override, tuple) and override:
+            return override  # type: ignore[return-value]
+    return AURORA_COLORS
+
+
+def get_music_palette() -> tuple[tuple[int, int, int], ...]:
+    """Live music ripple palette."""
+    if IS_DEV_MODE and DEV_STATE is not None:
+        override = DEV_STATE.palette_overrides.get("music_palette")
+        if isinstance(override, tuple) and override:
+            return override  # type: ignore[return-value]
+    return MUSIC_THEME_PALETTE
+
+
+def get_emoji_confetti_palette() -> tuple[tuple[int, int, int], ...]:
+    """Live emoji confetti palette."""
+    if IS_DEV_MODE and DEV_STATE is not None:
+        override = DEV_STATE.palette_overrides.get("emoji_confetti")
+        if isinstance(override, tuple) and override:
+            return override  # type: ignore[return-value]
+    return EMOJI_CONFETTI_PALETTE
 
 
 # -----------------------------------------------------------------------------
@@ -571,7 +726,7 @@ class MusicTheme(Theme):
         if len(self.ripples) >= self._max_ripples:
             self.ripples.pop(0)
         x, y = self._random_position()
-        base = random.choice(MUSIC_THEME_PALETTE)
+        base = random.choice(get_music_palette())
         color = _apply_intensity_to_rgb(base, self.intensity)
         ripple = Ripple(x, y, color)
         ripple.radius = self._initial_radius
@@ -582,7 +737,11 @@ class MusicTheme(Theme):
     def draw_background(self, screen: pygame.Surface) -> None:
         """24-strip aurora gradient + sound-reactive white pulse overlay."""
         w, h = screen.get_size()
-        c0, c1, c2 = AURORA_COLORS
+        aurora = get_aurora_colors()
+        if len(aurora) >= 3:
+            c0, c1, c2 = aurora[0], aurora[1], aurora[2]
+        else:
+            c0, c1, c2 = AURORA_COLORS
         n = AURORA_STRIPS
         inv_n = 1.0 / n
         tau_inv = self._aurora_time / AURORA_CYCLE_SEC
@@ -774,7 +933,7 @@ class EmojiTheme(Theme):
             vx = math.cos(ang) * spd
             vy = math.sin(ang) * spd
             r = random.uniform(r_lo, r_hi)
-            base = random.choice(EMOJI_CONFETTI_PALETTE)
+            base = random.choice(get_emoji_confetti_palette())
             dot_color = _apply_intensity_to_rgb(base, self.intensity)
             self.confetti.append(
                 ConfettiParticle(float(cx), float(cy), vx, vy, r, dot_color)
@@ -2003,7 +2162,9 @@ class SetupScreen:
     def _draw_animated_background(self, screen: pygame.Surface) -> None:
         w, h = screen.get_size()
         phase = (math.sin(self._bg_time * (2.0 * math.pi / SETUP_BG_CYCLE_SEC)) + 1.0) * 0.5
-        pal = MUSIC_THEME_PALETTE
+        pal = get_music_palette()
+        if len(pal) < 8:
+            pal = MUSIC_THEME_PALETTE
         # Morph gradient endpoints through palette pairs; blend toward base so UI stays legible.
         c_top = _lerp_rgb(_lerp_rgb(pal[0], pal[5], phase), SETUP_BACKGROUND_COLOR, 0.32)
         c_bot = _lerp_rgb(_lerp_rgb(pal[3], pal[7], phase), SETUP_BACKGROUND_COLOR, 0.32)
@@ -2426,6 +2587,7 @@ def main() -> None:
 
     if IS_DEV_MODE:
         DEV_STATE = DevState()
+        init_dev_palette()
         _dev_log("dev mode active")
 
     pygame.mixer.pre_init(SAMPLE_RATE, -16, 2, 512)
@@ -2469,6 +2631,8 @@ def main() -> None:
         running = True
         while running:
             dt = clock.tick(TARGET_FPS) / 1000.0
+
+            poll_dev_palette(dt)
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
