@@ -108,7 +108,12 @@ def dev_session_start(theme_name: str, volume: float, intensity: float) -> None:
 
 
 def dev_session_end() -> None:
-    """Write the per-session summary footer and detach the active log file."""
+    """
+    Write the per-session summary footer. The active log path stays attached
+    so any straggler drop / breach that fires during the unlock + cleanup
+    work in the same tick still attributes to the session that owned it.
+    The next dev_session_start overwrites the path before its own header.
+    """
     if not IS_DEV_MODE or DEV_STATE is None:
         return
     if DEV_STATE.active_log_path is None:
@@ -125,7 +130,6 @@ def dev_session_end() -> None:
             file.write(footer)
     except OSError:
         pass
-    DEV_STATE.active_log_path = None
 
 
 class DevState:
