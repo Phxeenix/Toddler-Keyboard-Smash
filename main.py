@@ -37,14 +37,28 @@ import pygame
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 IS_DEV_MODE = (os.environ.get("KEYBOARD_MASHER_DEV") == "1") and not IS_FROZEN
 
+# Persistent dev-mode log. All _dev_log calls append here so stress-test
+# PASS/FAIL, luminance breaches, frame-drop bursts, palette swaps, and HUD
+# toggles can be audited after the fact.
+DEV_LOG_PATH = Path(__file__).resolve().parent / "dev_log.txt"
+
 
 def _dev_log(message: str) -> None:
-    """Write a dev-mode diagnostic to stderr; no-op in release."""
+    """
+    Write a dev-mode diagnostic to stderr AND dev_log.txt. No-op in release.
+    Each line is timestamped so multiple runs interleave cleanly.
+    """
     if not IS_DEV_MODE:
         return
+    line = f"[dev {time.strftime('%Y-%m-%dT%H:%M:%S')}] {message}\n"
     try:
-        sys.stderr.write(f"[dev] {message}\n")
+        sys.stderr.write(line)
         sys.stderr.flush()
+    except OSError:
+        pass
+    try:
+        with DEV_LOG_PATH.open("a", encoding="utf-8") as file:
+            file.write(line)
     except OSError:
         pass
 
@@ -67,6 +81,8 @@ class DevState:
         "stress_result_text",
         "stress_result_until",
         "stress_result_pass",
+        "last_lum_breach_log",
+        "last_drop_log",
     )
 
     def __init__(self) -> None:
@@ -83,6 +99,10 @@ class DevState:
         self.stress_result_text: str = ""
         self.stress_result_until: float = 0.0
         self.stress_result_pass: bool = True
+        # Throttle timestamps so a sustained breach logs once per second,
+        # not every frame.
+        self.last_lum_breach_log: float = 0.0
+        self.last_drop_log: float = 0.0
 
 
 # Probe constants — chosen to align with Harding-style photosensitivity rules.
@@ -3158,8 +3178,27 @@ def main() -> None:
                     ):
                         probe.resize(screen.get_size())
                     probe.sample(screen, now_mono)
+                    breach_hz = probe.hz()
+                    if (
+                        breach_hz > LUM_PROBE_HZ_BREACH
+                        and now_mono - DEV_STATE.last_lum_breach_log >= 1.0
+                    ):
+                        _dev_log(
+                            f"luminance breach hz={breach_hz:.2f} "
+                            f"(cap {LUM_PROBE_HZ_BREACH:.1f})"
+                        )
+                        DEV_STATE.last_lum_breach_log = now_mono
                 if DEV_STATE.frame_histogram is not None:
                     DEV_STATE.frame_histogram.push(dt, now_mono)
+                    dropped = DEV_STATE.frame_histogram.counts()[4]
+                    if (
+                        dropped > 0
+                        and now_mono - DEV_STATE.last_drop_log >= 1.0
+                    ):
+                        _dev_log(
+                            f"frame drops in last 1s: {dropped} frames >20ms"
+                        )
+                        DEV_STATE.last_drop_log = now_mono
                 stress = DEV_STATE.stress_test
                 if (
                     stress is not None
