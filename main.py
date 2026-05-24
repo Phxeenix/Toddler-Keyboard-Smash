@@ -9,6 +9,7 @@ import atexit
 import ctypes
 import json
 import math
+import os
 import queue
 import random
 import sys
@@ -21,6 +22,58 @@ from typing import Any, Callable, NamedTuple
 
 import numpy as np
 import pygame
+
+# -----------------------------------------------------------------------------
+# Dev mode — measurement & instrumentation gate
+# -----------------------------------------------------------------------------
+#
+# Dev mode unlocks the luminance HUD, frame-time histogram, palette hot-reload,
+# and synthetic stress test. Enabled only when KEYBOARD_MASHER_DEV=1 is set in
+# the environment AND the process is not a frozen (PyInstaller) build. This
+# guarantees the shipped .exe can never expose dev surfaces, even if the env
+# var leaks into a parent's session.
+
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+IS_DEV_MODE = (os.environ.get("KEYBOARD_MASHER_DEV") == "1") and not IS_FROZEN
+
+
+def _dev_log(message: str) -> None:
+    """Write a dev-mode diagnostic to stderr; no-op in release."""
+    if not IS_DEV_MODE:
+        return
+    try:
+        sys.stderr.write(f"[dev] {message}\n")
+        sys.stderr.flush()
+    except OSError:
+        pass
+
+
+class DevState:
+    """
+    Container for dev-mode runtime state (HUD toggles, probes, stress test).
+    All fields default to 'off' so flipping IS_DEV_MODE to False leaves the
+    container inert. Later Phase 0 sub-plans populate the per-feature fields.
+    """
+
+    __slots__ = (
+        "hud_visible",
+        "frame_hist_visible",
+        "palette_overrides",
+        "palette_mtime",
+        "stress_test_active",
+    )
+
+    def __init__(self) -> None:
+        self.hud_visible: bool = False
+        self.frame_hist_visible: bool = False
+        self.palette_overrides: dict[str, Any] = {}
+        self.palette_mtime: float = 0.0
+        self.stress_test_active: bool = False
+
+
+# Module-level singleton; populated in main() only when IS_DEV_MODE is True.
+DEV_STATE: DevState | None = None
+
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -2369,6 +2422,11 @@ def _reclaim_fullscreen_focus(screen: pygame.Surface, setup_screen: SetupScreen)
 
 def main() -> None:
     global NOTE_SOUNDS, POP_WAVE, _SESSION_CLEANUP_ARGS, _ATEXIT_SESSION_CLEANUP_REGISTERED
+    global DEV_STATE
+
+    if IS_DEV_MODE:
+        DEV_STATE = DevState()
+        _dev_log("dev mode active")
 
     pygame.mixer.pre_init(SAMPLE_RATE, -16, 2, 512)
 
