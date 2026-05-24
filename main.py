@@ -37,33 +37,95 @@ import pygame
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 IS_DEV_MODE = (os.environ.get("KEYBOARD_MASHER_DEV") == "1") and not IS_FROZEN
 
-# Persistent dev-mode log. All _dev_log calls append here so stress-test
-# PASS/FAIL, luminance breaches, frame-drop bursts, palette swaps, and HUD
-# toggles can be audited after the fact. Lives under ./logs/ so the whole
-# directory can be ignored with one .gitignore line.
+# Persistent dev-mode log. Each PLAYING session writes to its own theme file
+# under ./logs/ (e.g. logs/music.log, logs/emoji.log). Events outside a
+# session go to logs/general.log. _dev_log writes safety- and test-critical
+# events to the active file; _dev_trace is stderr-only chatter for live
+# debugging and does NOT persist. Keeping the file lean is the point — when
+# the owner shares a log we want to scan it in seconds, not minutes.
 DEV_LOG_DIR = Path(__file__).resolve().parent / "logs"
-DEV_LOG_PATH = DEV_LOG_DIR / "dev_log.txt"
+DEV_GENERAL_LOG_PATH = DEV_LOG_DIR / "general.log"
+
+
+def _active_dev_log_path() -> Path:
+    if DEV_STATE is not None and DEV_STATE.active_log_path is not None:
+        return DEV_STATE.active_log_path
+    return DEV_GENERAL_LOG_PATH
+
+
+def _dev_trace(message: str) -> None:
+    """Stderr-only chatter (HUD toggles, redundant rejections). Not persisted."""
+    if not IS_DEV_MODE:
+        return
+    try:
+        sys.stderr.write(f"[trace] {message}\n")
+        sys.stderr.flush()
+    except OSError:
+        pass
 
 
 def _dev_log(message: str) -> None:
     """
-    Write a dev-mode diagnostic to stderr AND logs/dev_log.txt. No-op in
-    release. Each line is timestamped so multiple runs interleave cleanly.
+    Persist a safety- or test-critical event to the active session log file
+    (or general.log outside a session) AND stderr. No-op in release.
     """
     if not IS_DEV_MODE:
         return
-    line = f"[dev {time.strftime('%Y-%m-%dT%H:%M:%S')}] {message}\n"
+    line = f"[{time.strftime('%H:%M:%S')}] {message}\n"
     try:
-        sys.stderr.write(line)
+        sys.stderr.write(f"[dev] {line}")
         sys.stderr.flush()
     except OSError:
         pass
+    target = _active_dev_log_path()
     try:
         DEV_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with DEV_LOG_PATH.open("a", encoding="utf-8") as file:
+        with target.open("a", encoding="utf-8") as file:
             file.write(line)
     except OSError:
         pass
+
+
+def dev_session_start(theme_name: str, volume: float, intensity: float) -> None:
+    """Switch the active log file to this theme and write a session header."""
+    if not IS_DEV_MODE or DEV_STATE is None:
+        return
+    safe = "".join(c for c in theme_name.lower() if c.isalnum()) or "session"
+    DEV_STATE.active_log_path = DEV_LOG_DIR / f"{safe}.log"
+    DEV_STATE.session_started_at = time.monotonic()
+    DEV_STATE.session_breach_count = 0
+    DEV_STATE.session_drop_count = 0
+    header = (
+        f"\n=== session start {time.strftime('%Y-%m-%dT%H:%M:%S')} "
+        f"theme={theme_name} volume={volume:.2f} intensity={intensity:.2f} ===\n"
+    )
+    try:
+        DEV_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with DEV_STATE.active_log_path.open("a", encoding="utf-8") as file:
+            file.write(header)
+    except OSError:
+        pass
+
+
+def dev_session_end() -> None:
+    """Write the per-session summary footer and detach the active log file."""
+    if not IS_DEV_MODE or DEV_STATE is None:
+        return
+    if DEV_STATE.active_log_path is None:
+        return
+    duration = time.monotonic() - DEV_STATE.session_started_at
+    footer = (
+        f"=== session end   {time.strftime('%Y-%m-%dT%H:%M:%S')} "
+        f"duration={duration:.1f}s "
+        f"luminance_breaches={DEV_STATE.session_breach_count} "
+        f"frame_drop_bursts={DEV_STATE.session_drop_count} ===\n"
+    )
+    try:
+        with DEV_STATE.active_log_path.open("a", encoding="utf-8") as file:
+            file.write(footer)
+    except OSError:
+        pass
+    DEV_STATE.active_log_path = None
 
 
 class DevState:
@@ -86,6 +148,10 @@ class DevState:
         "stress_result_pass",
         "last_lum_breach_log",
         "last_drop_log",
+        "active_log_path",
+        "session_started_at",
+        "session_breach_count",
+        "session_drop_count",
     )
 
     def __init__(self) -> None:
@@ -106,6 +172,11 @@ class DevState:
         # not every frame.
         self.last_lum_breach_log: float = 0.0
         self.last_drop_log: float = 0.0
+        # Per-session log routing + counters (set by dev_session_start).
+        self.active_log_path: Path | None = None
+        self.session_started_at: float = 0.0
+        self.session_breach_count: int = 0
+        self.session_drop_count: int = 0
 
 
 # Probe constants — chosen to align with Harding-style photosensitivity rules.
@@ -754,7 +825,7 @@ def poll_dev_palette(dt: float) -> None:
         return
     DEV_STATE.palette_overrides.update(parsed)
     DEV_STATE.palette_mtime = mtime
-    _dev_log(f"palette reloaded from {DEV_PALETTE_PATH.name}")
+    _dev_trace(f"palette reloaded from {DEV_PALETTE_PATH.name}")
 
 
 def init_dev_palette() -> None:
@@ -763,7 +834,7 @@ def init_dev_palette() -> None:
         return
     if not DEV_PALETTE_PATH.exists():
         _write_dev_palette_atomic(_default_dev_palette_payload())
-        _dev_log(f"wrote default palette to {DEV_PALETTE_PATH.name}")
+        _dev_trace(f"wrote default palette to {DEV_PALETTE_PATH.name}")
     parsed = _read_dev_palette()
     if parsed is None:
         return
@@ -2179,6 +2250,7 @@ def leave_playing_state(
     accessibility_keys_suppressor: AccessibilityKeysSuppressor,
 ) -> None:
     """Call when exiting PLAYING (return to setup or quit)."""
+    dev_session_end()
     keyboard_lockdown.remove()
     win_key_suppressor.restore()
     lock_workstation_suppressor.restore()
@@ -2910,6 +2982,7 @@ def begin_play_session(
         theme = MusicTheme(screen, NOTE_SOUNDS, config.intensity)
     else:
         theme = EmojiTheme(screen, config.intensity)
+    dev_session_start(theme.name, config.volume, config.intensity)
     return theme, theme.name, THEME_LABEL_DURATION
 
 
@@ -2999,7 +3072,7 @@ def main() -> None:
     if IS_DEV_MODE:
         DEV_STATE = DevState()
         init_dev_palette()
-        _dev_log("dev mode active")
+        _dev_trace("dev mode active")
 
     pygame.mixer.pre_init(SAMPLE_RATE, -16, 2, 512)
 
@@ -3072,7 +3145,7 @@ def main() -> None:
                     and event.key == pygame.K_F8
                 ):
                     DEV_STATE.hud_visible = not DEV_STATE.hud_visible
-                    _dev_log(
+                    _dev_trace(
                         f"luminance HUD {'on' if DEV_STATE.hud_visible else 'off'}"
                     )
 
@@ -3083,7 +3156,7 @@ def main() -> None:
                     and event.key == pygame.K_F9
                 ):
                     DEV_STATE.frame_hist_visible = not DEV_STATE.frame_hist_visible
-                    _dev_log(
+                    _dev_trace(
                         f"frame histogram "
                         f"{'on' if DEV_STATE.frame_hist_visible else 'off'}"
                     )
@@ -3099,7 +3172,7 @@ def main() -> None:
                         DEV_STATE.stress_test.start(time.monotonic())
                         _dev_log("stress test started (15 s)")
                     else:
-                        _dev_log("stress test requires PLAYING state")
+                        _dev_trace("stress test requires PLAYING state")
 
                 elif app_state == AppState.SETUP:
                     session = setup_screen.handle_event(event)
@@ -3191,6 +3264,7 @@ def main() -> None:
                             f"(cap {LUM_PROBE_HZ_BREACH:.1f})"
                         )
                         DEV_STATE.last_lum_breach_log = now_mono
+                        DEV_STATE.session_breach_count += 1
                 if DEV_STATE.frame_histogram is not None:
                     DEV_STATE.frame_histogram.push(dt, now_mono)
                     dropped = DEV_STATE.frame_histogram.counts()[4]
@@ -3202,6 +3276,7 @@ def main() -> None:
                             f"frame drops in last 1s: {dropped} frames >20ms"
                         )
                         DEV_STATE.last_drop_log = now_mono
+                        DEV_STATE.session_drop_count += 1
                 stress = DEV_STATE.stress_test
                 if (
                     stress is not None
