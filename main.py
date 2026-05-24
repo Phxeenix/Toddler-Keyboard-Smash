@@ -1084,6 +1084,97 @@ class Theme(ABC):
 
 
 # -----------------------------------------------------------------------------
+# Background composition — per-theme background layer owned by each Theme.
+# Themes delegate to their background for the bottom-most visual layer so
+# later phases (Phase 2 confetti drift, Phase 5 illustrated scenes) can layer
+# additional content into a clean seam without rewriting the theme classes.
+# -----------------------------------------------------------------------------
+
+
+class Background:
+    """Base class for theme background layers. Subclasses own all state."""
+
+    def __init__(self, screen: pygame.Surface) -> None:
+        self._screen_w, self._screen_h = screen.get_size()
+
+    def clear(self) -> None:
+        """Reset background state (called from Theme.clear)."""
+
+    def update(self, dt: float) -> None:
+        """Advance background animations; default no-op."""
+
+    def draw(self, screen: pygame.Surface) -> None:
+        """Paint the background. Default: solid BACKGROUND_COLOR fill."""
+        screen.fill(BACKGROUND_COLOR)
+
+
+class MusicBackground(Background):
+    """Aurora gradient with sound-reactive white pulse overlay."""
+
+    def __init__(self, screen: pygame.Surface) -> None:
+        super().__init__(screen)
+        self._aurora_time: float = 0.0
+        self._pulses: list[float] = []
+        self._pulse_surf: pygame.Surface | None = None
+
+    def clear(self) -> None:
+        self._pulses.clear()
+
+    def on_pulse_trigger(self) -> None:
+        """Called by MusicTheme.on_keypress to register a new pulse."""
+        self._pulses.append(0.0)
+
+    def update(self, dt: float) -> None:
+        self._aurora_time += dt
+        self._pulses = [
+            age + dt for age in self._pulses
+            if age + dt < PULSE_DURATION_SEC
+        ]
+
+    def draw(self, screen: pygame.Surface) -> None:
+        w, h = screen.get_size()
+        aurora = get_aurora_colors()
+        if len(aurora) >= 3:
+            c0, c1, c2 = aurora[0], aurora[1], aurora[2]
+        else:
+            c0, c1, c2 = AURORA_COLORS
+        tau_inv = self._aurora_time / AURORA_CYCLE_SEC
+        pix = _aurora_column_pixels(tau_inv, h, c0, c1, c2)
+        col_surf = pygame.surfarray.make_surface(pix)
+        pygame.transform.scale(col_surf, (w, h), screen)
+
+        if self._pulses:
+            total = 0.0
+            for age in self._pulses:
+                t = age / PULSE_DURATION_SEC
+                fade = 1.0 - _ease_out_cubic(t)
+                total += fade * PULSE_PER_KEY
+            total = min(total, PULSE_MAX_OPACITY)
+            overlay_alpha = int(round(total * 255))
+            if overlay_alpha > 0:
+                if (
+                    self._pulse_surf is None
+                    or self._pulse_surf.get_size() != (w, h)
+                ):
+                    self._pulse_surf = pygame.Surface((w, h), pygame.SRCALPHA)
+                    self._pulse_surf.fill((255, 255, 255, 0))
+                self._pulse_surf.set_alpha(overlay_alpha)
+                self._pulse_surf.fill((255, 255, 255))
+                screen.blit(self._pulse_surf, (0, 0))
+
+
+class EmojiBackground(Background):
+    """
+    Calm dark base for the Emoji theme. Identical to the inherited
+    BACKGROUND_COLOR fill for now; Phase 1.03 tunes the color and Phase 2.03
+    layers drifting confetti behind everything.
+    """
+
+    def draw(self, screen: pygame.Surface) -> None:
+        screen.fill(BACKGROUND_COLOR)
+
+
+# -----------------------------------------------------------------------------
 # MusicTheme — expanding, fading ripples
 # -----------------------------------------------------------------------------
 
@@ -1209,14 +1300,12 @@ class MusicTheme(Theme):
         self._radius_growth = self.RADIUS_GROWTH * scale
         self._ring_width = max(3, int(self.RING_WIDTH * scale))
         self._initial_radius = 8.0 * scale
-        self._aurora_time = 0.0
-        self._pulses: list[float] = []   # age (seconds) of each active pulse
-        self._pulse_surf: pygame.Surface | None = None  # cached white overlay
+        self._background = MusicBackground(screen)
 
     def _on_clear(self) -> None:
         self.ripples.clear()
         self.sparkles.clear()
-        self._pulses.clear()
+        self._background.clear()
 
     def _spawn_sparkles(self, x: int, y: int, color: tuple[int, int, int]) -> None:
         n = _particle_count_for_intensity(self.intensity)
@@ -1244,52 +1333,13 @@ class MusicTheme(Theme):
         ripple.radius = self._initial_radius
         self.ripples.append(ripple)
         self._spawn_sparkles(x, y, _lighter_tint(color))
-        self._pulses.append(0.0)
+        self._background.on_pulse_trigger()
 
     def draw_background(self, screen: pygame.Surface) -> None:
-        """Per-pixel aurora gradient + sound-reactive white pulse overlay."""
-        w, h = screen.get_size()
-        aurora = get_aurora_colors()
-        if len(aurora) >= 3:
-            c0, c1, c2 = aurora[0], aurora[1], aurora[2]
-        else:
-            c0, c1, c2 = AURORA_COLORS
-        tau_inv = self._aurora_time / AURORA_CYCLE_SEC
-        # Build a 1-px-wide column sampled per row, then stretch horizontally.
-        # Per-pixel resolution kills the visible 45-px-tall bars from the
-        # previous 24-strip render without measurable cost (~0.3 ms / frame
-        # at 1080p on dev hardware).
-        pix = _aurora_column_pixels(tau_inv, h, c0, c1, c2)
-        col_surf = pygame.surfarray.make_surface(pix)
-        pygame.transform.scale(col_surf, (w, h), screen)
-
-        # Sound-reactive brightness pulse — sum contributions, cap, blit once.
-        if self._pulses:
-            total = 0.0
-            for age in self._pulses:
-                t = age / PULSE_DURATION_SEC          # 0 → 1 over lifetime
-                fade = 1.0 - _ease_out_cubic(t)       # 1 at birth, eases to 0
-                total += fade * PULSE_PER_KEY
-            total = min(total, PULSE_MAX_OPACITY)
-            overlay_alpha = int(round(total * 255))
-            if overlay_alpha > 0:
-                # Reuse cached surface; recreate only if screen size changed.
-                if (
-                    self._pulse_surf is None
-                    or self._pulse_surf.get_size() != (w, h)
-                ):
-                    self._pulse_surf = pygame.Surface((w, h), pygame.SRCALPHA)
-                    self._pulse_surf.fill((255, 255, 255, 0))
-                self._pulse_surf.set_alpha(overlay_alpha)
-                self._pulse_surf.fill((255, 255, 255))
-                screen.blit(self._pulse_surf, (0, 0))
+        self._background.draw(screen)
 
     def update(self, dt: float) -> None:
-        self._aurora_time += dt
-        self._pulses = [
-            age + dt for age in self._pulses
-            if age + dt < PULSE_DURATION_SEC
-        ]
+        self._background.update(dt)
         alive: list[Ripple] = []
         for ripple in self.ripples:
             ripple.pop_age += dt
@@ -1414,10 +1464,15 @@ class EmojiTheme(Theme):
         self._max_emojis = max(1, int(MAX_EMOJIS * scale))
         self._size_min = max(16, int(EMOJI_SIZE_MIN * scale))
         self._size_max = max(self._size_min, int(EMOJI_SIZE_MAX * scale))
+        self._background = EmojiBackground(screen)
 
     def _on_clear(self) -> None:
         self.emojis.clear()
         self.confetti.clear()
+        self._background.clear()
+
+    def draw_background(self, screen: pygame.Surface) -> None:
+        self._background.draw(screen)
 
     def _font_for_size(self, size: int) -> pygame.font.Font:
         if size not in self._font_cache:
@@ -1453,6 +1508,7 @@ class EmojiTheme(Theme):
         self._spawn_confetti(x, y)
 
     def update(self, dt: float) -> None:
+        self._background.update(dt)
         alive: list[EmojiSprite] = []
         for emoji in self.emojis:
             emoji.age += dt
