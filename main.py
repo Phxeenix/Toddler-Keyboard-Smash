@@ -61,9 +61,12 @@ class DevState:
         "frame_hist_visible",
         "palette_overrides",
         "palette_mtime",
-        "stress_test_active",
+        "stress_test",
         "luminance_probe",
         "frame_histogram",
+        "stress_result_text",
+        "stress_result_until",
+        "stress_result_pass",
     )
 
     def __init__(self) -> None:
@@ -73,9 +76,13 @@ class DevState:
         self.frame_hist_visible: bool = True
         self.palette_overrides: dict[str, Any] = {}
         self.palette_mtime: float = 0.0
-        self.stress_test_active: bool = False
+        self.stress_test: StressTest | None = None
         self.luminance_probe: LuminanceProbe | None = None
         self.frame_histogram: FrameHistogram | None = None
+        # Last finished stress-test result, surfaced as a 5 s overlay.
+        self.stress_result_text: str = ""
+        self.stress_result_until: float = 0.0
+        self.stress_result_pass: bool = True
 
 
 # Probe constants — chosen to align with Harding-style photosensitivity rules.
@@ -238,6 +245,131 @@ class FrameHistogram:
 
     def counts(self) -> tuple[int, ...]:
         return tuple(self._bin_counts)
+
+
+# Stress-test parameters: 30 Hz key emission, 10 s cycle through Q-Y, then
+# 5 s on a single key (Q). Modeled after the worst-case toddler input — six
+# fingers slapping the keyboard row at fast cadence.
+STRESS_CYCLE_KEYS: tuple[int, ...] = (
+    pygame.K_q, pygame.K_w, pygame.K_e,
+    pygame.K_r, pygame.K_t, pygame.K_y,
+)
+STRESS_RATE_HZ = 30.0
+STRESS_CYCLE_SEC = 10.0
+STRESS_HOLD_SEC = 5.0
+STRESS_TOTAL_SEC = STRESS_CYCLE_SEC + STRESS_HOLD_SEC
+
+
+class StressTest:
+    """
+    Drives 15 s of synthetic key events into the active theme to validate the
+    safety/perf budget under worst-case toddler input. PASS criteria: probe
+    Hz never exceeds LUM_PROBE_HZ_BREACH and no >20 ms frames are recorded.
+    """
+
+    __slots__ = (
+        "active",
+        "_started_at",
+        "_next_emit_at",
+        "_emit_count",
+        "_peak_hz",
+        "_peak_dropped",
+    )
+
+    def __init__(self) -> None:
+        self.active: bool = False
+        self._started_at: float = 0.0
+        self._next_emit_at: float = 0.0
+        self._emit_count: int = 0
+        self._peak_hz: float = 0.0
+        self._peak_dropped: int = 0
+
+    def start(self, now: float) -> None:
+        self.active = True
+        self._started_at = now
+        self._next_emit_at = now
+        self._emit_count = 0
+        self._peak_hz = 0.0
+        self._peak_dropped = 0
+
+    def tick(
+        self,
+        now: float,
+        theme: Theme | None,
+        probe: LuminanceProbe | None,
+        histogram: FrameHistogram | None,
+    ) -> tuple[bool, str] | None:
+        """
+        Advance one frame of the test. Returns (pass, summary) once finished;
+        None while running. Emits synthetic keys into `theme` directly so the
+        keyboard hook stays uninvolved.
+        """
+        if not self.active:
+            return None
+        elapsed = now - self._started_at
+        period = 1.0 / STRESS_RATE_HZ
+        while now >= self._next_emit_at and elapsed < STRESS_TOTAL_SEC:
+            if elapsed < STRESS_CYCLE_SEC:
+                key = STRESS_CYCLE_KEYS[self._emit_count % len(STRESS_CYCLE_KEYS)]
+            else:
+                key = STRESS_CYCLE_KEYS[0]  # held single key
+            if theme is not None:
+                try:
+                    theme.on_keypress(key)
+                except Exception:  # noqa: BLE001 — stress test must not crash app
+                    pass
+            self._emit_count += 1
+            self._next_emit_at += period
+        if probe is not None:
+            hz = probe.hz()
+            if hz > self._peak_hz:
+                self._peak_hz = hz
+        if histogram is not None:
+            dropped = histogram.counts()[4]
+            if dropped > self._peak_dropped:
+                self._peak_dropped = dropped
+        if elapsed < STRESS_TOTAL_SEC:
+            return None
+        self.active = False
+        passed = (
+            self._peak_hz <= LUM_PROBE_HZ_BREACH
+            and self._peak_dropped == 0
+        )
+        summary = (
+            f"emits={self._emit_count}  "
+            f"peak_hz={self._peak_hz:.1f} (cap {LUM_PROBE_HZ_BREACH:.1f})  "
+            f"dropped_frames={self._peak_dropped}"
+        )
+        return passed, summary
+
+
+def draw_stress_overlay(
+    screen: pygame.Surface, font: pygame.font.Font
+) -> None:
+    """Center overlay shown briefly when a stress test completes."""
+    if not IS_DEV_MODE or DEV_STATE is None:
+        return
+    now = time.monotonic()
+    if now >= DEV_STATE.stress_result_until or not DEV_STATE.stress_result_text:
+        return
+    color = (150, 230, 150) if DEV_STATE.stress_result_pass else (240, 110, 110)
+    label = "STRESS PASS" if DEV_STATE.stress_result_pass else "STRESS FAIL"
+    surf_label = font.render(label, True, color)
+    surf_detail = font.render(DEV_STATE.stress_result_text, True, (220, 220, 220))
+    pad = 12
+    inner_w = max(surf_label.get_width(), surf_detail.get_width())
+    inner_h = surf_label.get_height() + 4 + surf_detail.get_height()
+    bg = pygame.Surface((inner_w + pad * 2, inner_h + pad * 2), pygame.SRCALPHA)
+    bg.fill((0, 0, 0, 200))
+    sw, sh = screen.get_size()
+    bx = (sw - bg.get_width()) // 2
+    by = sh - bg.get_height() - 60
+    screen.blit(bg, (bx, by))
+    screen.blit(surf_label, (bx + pad, by + pad))
+    screen.blit(
+        surf_detail,
+        (bx + pad, by + pad + surf_label.get_height() + 4),
+    )
 
 
 def draw_frame_histogram(
@@ -2867,10 +2999,13 @@ def main() -> None:
         unlock_overlay_font = pygame.font.SysFont(UI_FONT_NAME, 18)
 
         dev_hud_font: pygame.font.Font | None = None
+        dev_overlay_font: pygame.font.Font | None = None
         if IS_DEV_MODE and DEV_STATE is not None:
             DEV_STATE.luminance_probe = LuminanceProbe(screen.get_size())
             DEV_STATE.frame_histogram = FrameHistogram()
+            DEV_STATE.stress_test = StressTest()
             dev_hud_font = pygame.font.SysFont(UI_FONT_NAME, 16)
+            dev_overlay_font = pygame.font.SysFont(UI_FONT_NAME, 22)
 
         app_state = AppState.SETUP
         setup_screen = SetupScreen(screen)
@@ -2918,6 +3053,19 @@ def main() -> None:
                         f"frame histogram "
                         f"{'on' if DEV_STATE.frame_hist_visible else 'off'}"
                     )
+
+                elif (
+                    IS_DEV_MODE
+                    and DEV_STATE is not None
+                    and DEV_STATE.stress_test is not None
+                    and event.type == pygame.KEYDOWN
+                    and event.key == pygame.K_F7
+                ):
+                    if app_state == AppState.PLAYING and current_theme is not None:
+                        DEV_STATE.stress_test.start(time.monotonic())
+                        _dev_log("stress test started (15 s)")
+                    else:
+                        _dev_log("stress test requires PLAYING state")
 
                 elif app_state == AppState.SETUP:
                     session = setup_screen.handle_event(event)
@@ -3001,9 +3149,30 @@ def main() -> None:
                     probe.sample(screen, now_mono)
                 if DEV_STATE.frame_histogram is not None:
                     DEV_STATE.frame_histogram.push(dt, now_mono)
+                stress = DEV_STATE.stress_test
+                if (
+                    stress is not None
+                    and stress.active
+                    and app_state == AppState.PLAYING
+                ):
+                    result = stress.tick(
+                        now_mono,
+                        current_theme,
+                        DEV_STATE.luminance_probe,
+                        DEV_STATE.frame_histogram,
+                    )
+                    if result is not None:
+                        passed, summary = result
+                        DEV_STATE.stress_result_pass = passed
+                        DEV_STATE.stress_result_text = summary
+                        DEV_STATE.stress_result_until = now_mono + 5.0
+                        verdict = "PASS" if passed else "FAIL"
+                        _dev_log(f"stress test {verdict}: {summary}")
                 if dev_hud_font is not None:
                     draw_luminance_hud(screen, dev_hud_font)
                     draw_frame_histogram(screen, dev_hud_font)
+                if dev_overlay_font is not None:
+                    draw_stress_overlay(screen, dev_overlay_font)
 
             pygame.display.flip()
     finally:
