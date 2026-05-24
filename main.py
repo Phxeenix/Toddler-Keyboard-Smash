@@ -642,11 +642,16 @@ EMOJI_CONFETTI_PALETTE: tuple[tuple[int, int, int], ...] = (
     (116, 192, 252),  # #74c0fc
 )
 
-# Aurora background — three music-palette hues desaturated 40 % toward luminance.
+# Aurora background — midnight-aurora palette (deep teal → slate-blue → deep
+# purple). Replaces the earlier near-white pastels (#a8edea / #c3cfe2 /
+# #e0c3fc desaturated 40%) which the owner correctly flagged as "super
+# bright" — light pastel ripples drawn on top had no contrast against them.
+# These darker hues let the foreground ripples and sparkles read as the
+# most prominent layer, matching the CLAUDE.md Montessori constraint.
 _AURORA_RAW: tuple[tuple[int, int, int], ...] = (
-    (168, 237, 234),  # #a8edea
-    (195, 207, 226),  # #c3cfe2
-    (224, 195, 252),  # #e0c3fc
+    (40, 80, 95),    # deep teal-blue
+    (55, 60, 95),    # deep slate
+    (80, 50, 110),   # deep purple
 )
 
 def _desaturate_rgb(
@@ -662,17 +667,23 @@ def _desaturate_rgb(
     )
 
 AURORA_COLORS: tuple[tuple[int, int, int], ...] = tuple(
-    _desaturate_rgb(c) for c in _AURORA_RAW
+    _desaturate_rgb(c, amount=0.20) for c in _AURORA_RAW
 )
 AURORA_CYCLE_SEC = 12.0
 # Retained for back-compat in dev tooling but no longer used by the render
 # path — aurora is now drawn per-pixel via numpy for a smooth gradient.
 AURORA_STRIPS = 24
 
-# Sound-reactive pulse overlay constants.
-PULSE_DURATION_SEC = 0.35     # how long one pulse lasts
-PULSE_PER_KEY = 0.15          # opacity contribution per keypress (0-1)
-PULSE_MAX_OPACITY = 0.35      # hard cap so screen never washes out
+# Sound-reactive pulse overlay constants. Each pulse now eases IN over its
+# first PULSE_ATTACK_SEC before easing OUT for the remainder, so keypresses
+# read as a soft "breath" instead of an instantaneous flash. Caps tightened
+# from the v2 spec maxima (15 %/35 %) to match the owner's calmer-than-spec
+# preference — when the aurora is at its darkest, even small overlays
+# register clearly, so we don't need the higher headroom.
+PULSE_DURATION_SEC = 0.35     # total lifetime of one pulse
+PULSE_ATTACK_SEC = 0.08       # ease-in onset; rest of duration is ease-out
+PULSE_PER_KEY = 0.08          # peak opacity contribution per keypress (0-1)
+PULSE_MAX_OPACITY = 0.20      # hard cap so screen never washes out
 
 # Audio — C major pentatonic across two octaves (8 notes).
 SAMPLE_RATE = 44100
@@ -1168,10 +1179,16 @@ class MusicBackground(Background):
 
         if self._pulses:
             total = 0.0
+            decay_span = max(0.001, PULSE_DURATION_SEC - PULSE_ATTACK_SEC)
             for age in self._pulses:
-                t = age / PULSE_DURATION_SEC
-                fade = 1.0 - _ease_out_cubic(t)
-                total += fade * PULSE_PER_KEY
+                if age < PULSE_ATTACK_SEC:
+                    # Ease-in attack: 0 → peak over PULSE_ATTACK_SEC.
+                    contribution = _ease_out_cubic(age / PULSE_ATTACK_SEC) * PULSE_PER_KEY
+                else:
+                    # Ease-out decay: peak → 0 over the remainder.
+                    decay_t = (age - PULSE_ATTACK_SEC) / decay_span
+                    contribution = (1.0 - _ease_out_cubic(decay_t)) * PULSE_PER_KEY
+                total += contribution
             total = min(total, PULSE_MAX_OPACITY)
             overlay_alpha = int(round(total * 255))
             if overlay_alpha > 0:
