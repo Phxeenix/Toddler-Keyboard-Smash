@@ -674,12 +674,13 @@ AURORA_CYCLE_SEC = 12.0
 # path — aurora is now drawn per-pixel via numpy for a smooth gradient.
 AURORA_STRIPS = 24
 
-# Sound-reactive pulse overlay constants. Each pulse now eases IN over its
-# first PULSE_ATTACK_SEC before easing OUT for the remainder, so keypresses
-# read as a soft "breath" instead of an instantaneous flash. Caps tightened
-# from the v2 spec maxima (15 %/35 %) to match the owner's calmer-than-spec
-# preference — when the aurora is at its darkest, even small overlays
-# register clearly, so we don't need the higher headroom.
+# Sound-reactive pulse overlay constants. Disabled by default per owner
+# feedback that even a soft per-keypress brightness change reads as
+# "flicker" when tied 1-to-1 with keypress events. Phase 2 sub-plan 02-02
+# may revisit with a different trigger model (e.g. tied to overall keypress
+# *rate* rather than each individual key, so it only brightens during
+# active mashing and stays still during light play).
+PULSE_ENABLED = False
 PULSE_DURATION_SEC = 0.35     # total lifetime of one pulse
 PULSE_ATTACK_SEC = 0.08       # ease-in onset; rest of duration is ease-out
 PULSE_PER_KEY = 0.08          # peak opacity contribution per keypress (0-1)
@@ -1156,6 +1157,8 @@ class MusicBackground(Background):
 
     def on_pulse_trigger(self) -> None:
         """Called by MusicTheme.on_keypress to register a new pulse."""
+        if not PULSE_ENABLED:
+            return
         self._pulses.append(0.0)
 
     def update(self, dt: float) -> None:
@@ -1239,28 +1242,31 @@ def _aurora_column_pixels(
     c2: tuple[int, int, int],
 ) -> np.ndarray:
     """
-    Build a (1, height, 3) uint8 column where every row's color comes from
-    the per-pixel aurora wave. The result is a 1-pixel-wide image suitable
-    for pygame.surfarray.make_surface + transform.scale to fill the screen.
-    Smooths the previous 24-strip render by sampling at the row resolution
-    of the display, killing the visible horizontal banding.
+    Build a (1, height, 3) uint8 column for the aurora background.
+
+    Geometry: pure linear top-to-bottom gradient between two color stops.
+    Linear interpolation is monotonic, so there are no internal color
+    peaks — i.e. no horizontal "bands" can form, regardless of palette
+    contrast. This replaces the earlier two-sine wave that owner reported
+    still read as banded after the per-pixel fix.
+
+    Motion: the top and bottom stops slowly rotate through the 3-color
+    palette (c0 → c1 → c2 → c0 → ...) over AURORA_CYCLE_SEC, so the
+    gradient drifts but never breaks its linear shape.
     """
-    fy = (np.arange(height, dtype=np.float32) + 0.5) / float(height)
-    two_pi = 2.0 * math.pi
-    wave = (
-        np.sin(two_pi * (fy * 1.4 + t_norm)) * 0.6
-        + np.sin(two_pi * (fy * 0.7 - t_norm * 0.55 + 0.3)) * 0.4
+    fy = ((np.arange(height, dtype=np.float32) + 0.5) / float(height)).reshape(-1, 1)
+    palette = (
+        np.asarray(c0, dtype=np.float32),
+        np.asarray(c1, dtype=np.float32),
+        np.asarray(c2, dtype=np.float32),
     )
-    p = (wave + 1.0) * 0.5
-    c0a = np.asarray(c0, dtype=np.float32)
-    c1a = np.asarray(c1, dtype=np.float32)
-    c2a = np.asarray(c2, dtype=np.float32)
-    mask_low = (p < 0.5).reshape(-1, 1)
-    p_low = (p * 2.0).reshape(-1, 1)
-    p_high = ((p - 0.5) * 2.0).reshape(-1, 1)
-    low = c0a * (1.0 - p_low) + c1a * p_low
-    high = c1a * (1.0 - p_high) + c2a * p_high
-    colors = np.where(mask_low, low, high)
+    # phase ∈ [0, 3): pick which palette segment top/bottom currently span.
+    phase = (t_norm % 1.0) * 3.0
+    i = int(phase) % 3
+    sub = phase - float(int(phase))
+    top = palette[i] * (1.0 - sub) + palette[(i + 1) % 3] * sub
+    bot = palette[(i + 1) % 3] * (1.0 - sub) + palette[(i + 2) % 3] * sub
+    colors = top * (1.0 - fy) + bot * fy
     pix = np.empty((1, height, 3), dtype=np.uint8)
     pix[0] = colors.clip(0.0, 255.0).astype(np.uint8)
     return pix
