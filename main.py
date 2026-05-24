@@ -614,6 +614,13 @@ EMOJI_LIFETIME = 3.0  # seconds until fully faded
 EMOJI_SIZE_MIN = 48
 EMOJI_SIZE_MAX = 96
 
+# Cap how often a single held key (Windows auto-repeats at ~30 Hz) can spawn
+# a new emoji + confetti burst + pop. Keeps luminance-probe Hz comfortably
+# under the 3.0 cap when a toddler holds a key. Audio and visuals are
+# throttled together — never decouple (see memory/audio-visual-coupling).
+EMOJI_SPAWN_RATE_HZ = 15.0
+EMOJI_MIN_SPAWN_INTERVAL = 1.0 / EMOJI_SPAWN_RATE_HZ
+
 EMOJI_CHARS = (
     "🐶", "🐱", "🐰", "🐻", "🐼", "🦊", "🐸", "🐵",
     "⭐", "🌟", "✨", "🎈", "🌈", "🎉",
@@ -1512,6 +1519,8 @@ class EmojiTheme(Theme):
         self._size_min = max(16, int(EMOJI_SIZE_MIN * scale))
         self._size_max = max(self._size_min, int(EMOJI_SIZE_MAX * scale))
         self._background = EmojiBackground(screen)
+        # Last-accepted spawn timestamp; held keys throttle through this.
+        self._last_spawn_at = 0.0
 
     def _on_clear(self) -> None:
         self.emojis.clear()
@@ -1545,6 +1554,14 @@ class EmojiTheme(Theme):
 
     def on_keypress(self, key: int) -> None:
         del key
+        now = time.monotonic()
+        # Throttle held-key auto-repeats: drop the entire event (audio AND
+        # visual together) if the previous spawn was less than 1/15s ago.
+        # Quick taps slower than the cap go through every time.
+        if now - self._last_spawn_at < EMOJI_MIN_SPAWN_INTERVAL:
+            return
+        self._last_spawn_at = now
+
         play_pop_sound()
 
         if len(self.emojis) >= self._max_emojis:
