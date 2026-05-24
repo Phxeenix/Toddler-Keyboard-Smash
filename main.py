@@ -63,15 +63,19 @@ class DevState:
         "palette_mtime",
         "stress_test_active",
         "luminance_probe",
+        "frame_histogram",
     )
 
     def __init__(self) -> None:
-        self.hud_visible: bool = False
-        self.frame_hist_visible: bool = False
+        # HUD + histogram default ON in dev mode so a fresh launch shows them
+        # immediately; F8/F9 still toggle individually.
+        self.hud_visible: bool = True
+        self.frame_hist_visible: bool = True
         self.palette_overrides: dict[str, Any] = {}
         self.palette_mtime: float = 0.0
         self.stress_test_active: bool = False
         self.luminance_probe: LuminanceProbe | None = None
+        self.frame_histogram: FrameHistogram | None = None
 
 
 # Probe constants — chosen to align with Harding-style photosensitivity rules.
@@ -183,6 +187,107 @@ class LuminanceProbe:
                 total += hist[-1][1]
                 n += 1
         return total / n if n else 0.0
+
+
+# Frame-time histogram bins (seconds). 16.67 ms ≈ 60 fps cap; the >20 ms bin
+# represents dropped frames the toddler would actually perceive.
+FRAME_HIST_BINS: tuple[tuple[float, float], ...] = (
+    (0.000, 0.008),
+    (0.008, 0.012),
+    (0.012, 0.016),
+    (0.016, 0.020),
+    (0.020, float("inf")),
+)
+FRAME_HIST_LABELS: tuple[str, ...] = ("≤8", "≤12", "≤16", "≤20", ">20")
+FRAME_HIST_BAR_COLORS: tuple[tuple[int, int, int], ...] = (
+    (150, 220, 150),  # generous
+    (190, 220, 150),
+    (220, 220, 150),
+    (220, 180, 100),  # near miss
+    (240, 110, 110),  # dropped frame
+)
+FRAME_HIST_WINDOW_SEC = 1.0
+
+
+class FrameHistogram:
+    """
+    1-second rolling tally of frame deltas, bucketed into five bins. Used by
+    the dev HUD to show whether the render loop is meeting its 60 fps budget.
+    """
+
+    __slots__ = ("_samples", "_bin_counts")
+
+    def __init__(self) -> None:
+        self._samples: collections.deque[tuple[float, float]] = collections.deque()
+        self._bin_counts: list[int] = [0] * len(FRAME_HIST_BINS)
+
+    @staticmethod
+    def _bin_for(dt: float) -> int:
+        for i, (lo, hi) in enumerate(FRAME_HIST_BINS):
+            if lo <= dt < hi:
+                return i
+        return len(FRAME_HIST_BINS) - 1
+
+    def push(self, dt: float, now: float) -> None:
+        self._samples.append((now, dt))
+        self._bin_counts[self._bin_for(dt)] += 1
+        cutoff = now - FRAME_HIST_WINDOW_SEC
+        while self._samples and self._samples[0][0] < cutoff:
+            _, old_dt = self._samples.popleft()
+            self._bin_counts[self._bin_for(old_dt)] -= 1
+
+    def counts(self) -> tuple[int, ...]:
+        return tuple(self._bin_counts)
+
+
+def draw_frame_histogram(
+    screen: pygame.Surface, font: pygame.font.Font
+) -> None:
+    """Top-right HUD: per-bin frame counts over the last second."""
+    if (
+        not IS_DEV_MODE
+        or DEV_STATE is None
+        or not DEV_STATE.frame_hist_visible
+    ):
+        return
+    hist = DEV_STATE.frame_histogram
+    if hist is None:
+        return
+    counts = hist.counts()
+    total = sum(counts) or 1
+    parts: list[tuple[str, tuple[int, int, int]]] = []
+    parts.append(("FPS ", (220, 220, 220)))
+    for label, count, color in zip(
+        FRAME_HIST_LABELS, counts, FRAME_HIST_BAR_COLORS
+    ):
+        parts.append((f"{label}:{count:>2} ", color))
+    # Worst-bin indicator: red if any drops, yellow if any near-miss.
+    if counts[4] > 0:
+        flag_color = (240, 110, 110)
+        flag = "DROP"
+    elif counts[3] > 0:
+        flag_color = (220, 180, 100)
+        flag = "NEAR"
+    else:
+        flag_color = (170, 230, 170)
+        flag = "OK"
+    parts.append((f"[{flag}]", flag_color))
+
+    rendered = [font.render(text, True, color) for text, color in parts]
+    pad = 6
+    total_w = sum(s.get_width() for s in rendered)
+    h = max(s.get_height() for s in rendered)
+    bg = pygame.Surface((total_w + pad * 2, h + pad * 2), pygame.SRCALPHA)
+    bg.fill((0, 0, 0, 160))
+    sw = screen.get_width()
+    bg_x = sw - bg.get_width() - 8
+    bg_y = 8
+    screen.blit(bg, (bg_x, bg_y))
+    cursor = bg_x + pad
+    for surf in rendered:
+        screen.blit(surf, (cursor, bg_y + pad))
+        cursor += surf.get_width()
+    del total
 
 
 def draw_luminance_hud(
@@ -2764,6 +2869,7 @@ def main() -> None:
         dev_hud_font: pygame.font.Font | None = None
         if IS_DEV_MODE and DEV_STATE is not None:
             DEV_STATE.luminance_probe = LuminanceProbe(screen.get_size())
+            DEV_STATE.frame_histogram = FrameHistogram()
             dev_hud_font = pygame.font.SysFont(UI_FONT_NAME, 16)
 
         app_state = AppState.SETUP
@@ -2799,6 +2905,18 @@ def main() -> None:
                     DEV_STATE.hud_visible = not DEV_STATE.hud_visible
                     _dev_log(
                         f"luminance HUD {'on' if DEV_STATE.hud_visible else 'off'}"
+                    )
+
+                elif (
+                    IS_DEV_MODE
+                    and DEV_STATE is not None
+                    and event.type == pygame.KEYDOWN
+                    and event.key == pygame.K_F9
+                ):
+                    DEV_STATE.frame_hist_visible = not DEV_STATE.frame_hist_visible
+                    _dev_log(
+                        f"frame histogram "
+                        f"{'on' if DEV_STATE.frame_hist_visible else 'off'}"
                     )
 
                 elif app_state == AppState.SETUP:
@@ -2872,6 +2990,7 @@ def main() -> None:
                 )
 
             if IS_DEV_MODE and DEV_STATE is not None:
+                now_mono = time.monotonic()
                 probe = DEV_STATE.luminance_probe
                 if probe is not None:
                     if probe.positions and (
@@ -2879,9 +2998,12 @@ def main() -> None:
                         or probe.positions[-1][1] >= screen.get_height()
                     ):
                         probe.resize(screen.get_size())
-                    probe.sample(screen, time.monotonic())
+                    probe.sample(screen, now_mono)
+                if DEV_STATE.frame_histogram is not None:
+                    DEV_STATE.frame_histogram.push(dt, now_mono)
                 if dev_hud_font is not None:
                     draw_luminance_hud(screen, dev_hud_font)
+                    draw_frame_histogram(screen, dev_hud_font)
 
             pygame.display.flip()
     finally:
