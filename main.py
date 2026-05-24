@@ -6,6 +6,7 @@ Setup: Start Session  |  Playing: Ctrl+Shift+Q unlock  |  SETUP: Escape quits
 from __future__ import annotations
 
 import atexit
+import collections
 import ctypes
 import json
 import math
@@ -61,6 +62,7 @@ class DevState:
         "palette_overrides",
         "palette_mtime",
         "stress_test_active",
+        "luminance_probe",
     )
 
     def __init__(self) -> None:
@@ -69,6 +71,144 @@ class DevState:
         self.palette_overrides: dict[str, Any] = {}
         self.palette_mtime: float = 0.0
         self.stress_test_active: bool = False
+        self.luminance_probe: LuminanceProbe | None = None
+
+
+# Probe constants — chosen to align with Harding-style photosensitivity rules.
+# Threshold of 25 in 0–255 RGB luminance approximates the 10 cd/m² flash floor
+# used by W3C WCAG 2.3.1 detection tooling.
+LUM_PROBE_POSITIONS: tuple[tuple[float, float], ...] = (
+    (0.10, 0.10), (0.50, 0.10), (0.90, 0.10),
+    (0.10, 0.50),                 (0.90, 0.50),
+    (0.10, 0.90), (0.50, 0.90), (0.90, 0.90),
+)
+LUM_PROBE_WINDOW_SEC = 1.0
+LUM_PROBE_DELTA_THRESHOLD = 25.0   # 0–255 luminance units per transition
+LUM_PROBE_HZ_BREACH = 3.0          # CLAUDE.md hard cap: > 3 Hz is unsafe
+
+
+class LuminanceProbe:
+    """
+    Samples Rec.709 luminance at 8 fixed screen positions each frame. Holds a
+    1-second rolling history per probe and reports the worst-pixel transition
+    rate (Hz). Used as the empirical photosensitivity check that backs the
+    'no luminance changes > 3 Hz' constraint in CLAUDE.md.
+    """
+
+    __slots__ = ("positions", "_history", "_anchor", "_direction", "_last_hz")
+
+    def __init__(self, screen_size: tuple[int, int]) -> None:
+        w, h = screen_size
+        self.positions: list[tuple[int, int]] = [
+            (
+                max(0, min(w - 1, int(round(px * w)))),
+                max(0, min(h - 1, int(round(py * h)))),
+            )
+            for px, py in LUM_PROBE_POSITIONS
+        ]
+        n = len(self.positions)
+        self._history: list[collections.deque[tuple[float, float]]] = [
+            collections.deque() for _ in range(n)
+        ]
+        self._anchor: list[float] = [0.0] * n
+        self._direction: list[int] = [0] * n
+        self._last_hz: float = 0.0
+
+    def resize(self, screen_size: tuple[int, int]) -> None:
+        """Rebuild probe positions if the display size changed."""
+        w, h = screen_size
+        self.positions = [
+            (
+                max(0, min(w - 1, int(round(px * w)))),
+                max(0, min(h - 1, int(round(py * h)))),
+            )
+            for px, py in LUM_PROBE_POSITIONS
+        ]
+
+    @staticmethod
+    def _rec709(r: int, g: int, b: int) -> float:
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    def sample(self, screen: pygame.Surface, now: float) -> None:
+        """Read each probe pixel; expire entries older than the window."""
+        cutoff = now - LUM_PROBE_WINDOW_SEC
+        for i, (x, y) in enumerate(self.positions):
+            try:
+                color = screen.get_at((x, y))
+            except (IndexError, ValueError):
+                continue
+            lum = self._rec709(color[0], color[1], color[2])
+            hist = self._history[i]
+            hist.append((now, lum))
+            while hist and hist[0][0] < cutoff:
+                hist.popleft()
+
+    def hz(self) -> float:
+        """
+        Return the worst-pixel transition rate over the rolling 1 s window.
+        A 'transition' is a luminance reversal that has moved at least
+        LUM_PROBE_DELTA_THRESHOLD units from the last anchor — i.e., one
+        leg of a flash. A 3 Hz flash registers as ~6 transitions/sec.
+        """
+        worst = 0.0
+        for i, hist in enumerate(self._history):
+            if len(hist) < 2:
+                continue
+            anchor = hist[0][1]
+            direction = 0
+            transitions = 0
+            for _, lum in hist:
+                delta = lum - anchor
+                if abs(delta) < LUM_PROBE_DELTA_THRESHOLD:
+                    continue
+                new_dir = 1 if delta > 0 else -1
+                if new_dir != direction:
+                    transitions += 1
+                    direction = new_dir
+                anchor = lum
+            self._anchor[i] = anchor
+            self._direction[i] = direction
+            # Each full flash cycle ≈ 2 transitions, so Hz = transitions / 2.
+            hz = transitions / 2.0
+            if hz > worst:
+                worst = hz
+        self._last_hz = worst
+        return worst
+
+    def avg_luminance(self) -> float:
+        total = 0.0
+        n = 0
+        for hist in self._history:
+            if hist:
+                total += hist[-1][1]
+                n += 1
+        return total / n if n else 0.0
+
+
+def draw_luminance_hud(
+    screen: pygame.Surface, font: pygame.font.Font
+) -> None:
+    """Top-left HUD: avg luminance, Hz, breach indicator. Dev mode only."""
+    if not IS_DEV_MODE or DEV_STATE is None or not DEV_STATE.hud_visible:
+        return
+    probe = DEV_STATE.luminance_probe
+    if probe is None:
+        return
+    hz = probe.hz()
+    lum = probe.avg_luminance()
+    breach = hz > LUM_PROBE_HZ_BREACH
+    color = (255, 90, 90) if breach else (170, 230, 170)
+    flag = "BREACH" if breach else "OK"
+    text = f"LUM L:{lum:5.1f}  Hz:{hz:4.1f}  [{flag}]"
+    surf = font.render(text, True, color)
+    pad = 6
+    bg = pygame.Surface(
+        (surf.get_width() + pad * 2, surf.get_height() + pad * 2),
+        pygame.SRCALPHA,
+    )
+    bg.fill((0, 0, 0, 160))
+    screen.blit(bg, (8, 8))
+    screen.blit(surf, (8 + pad, 8 + pad))
 
 
 # Module-level singleton; populated in main() only when IS_DEV_MODE is True.
@@ -2621,6 +2761,11 @@ def main() -> None:
         hud_font = pygame.font.SysFont(UI_FONT_NAME, 28)
         unlock_overlay_font = pygame.font.SysFont(UI_FONT_NAME, 18)
 
+        dev_hud_font: pygame.font.Font | None = None
+        if IS_DEV_MODE and DEV_STATE is not None:
+            DEV_STATE.luminance_probe = LuminanceProbe(screen.get_size())
+            dev_hud_font = pygame.font.SysFont(UI_FONT_NAME, 16)
+
         app_state = AppState.SETUP
         setup_screen = SetupScreen(screen)
         current_theme: Theme | None = None
@@ -2644,6 +2789,17 @@ def main() -> None:
                     and app_state == AppState.SETUP
                 ):
                     running = False
+
+                elif (
+                    IS_DEV_MODE
+                    and DEV_STATE is not None
+                    and event.type == pygame.KEYDOWN
+                    and event.key == pygame.K_F8
+                ):
+                    DEV_STATE.hud_visible = not DEV_STATE.hud_visible
+                    _dev_log(
+                        f"luminance HUD {'on' if DEV_STATE.hud_visible else 'off'}"
+                    )
 
                 elif app_state == AppState.SETUP:
                     session = setup_screen.handle_event(event)
@@ -2714,6 +2870,18 @@ def main() -> None:
                     unlock_overlay_font,
                     dt,
                 )
+
+            if IS_DEV_MODE and DEV_STATE is not None:
+                probe = DEV_STATE.luminance_probe
+                if probe is not None:
+                    if probe.positions and (
+                        probe.positions[-1][0] >= screen.get_width()
+                        or probe.positions[-1][1] >= screen.get_height()
+                    ):
+                        probe.resize(screen.get_size())
+                    probe.sample(screen, time.monotonic())
+                if dev_hud_font is not None:
+                    draw_luminance_hud(screen, dev_hud_font)
 
             pygame.display.flip()
     finally:
