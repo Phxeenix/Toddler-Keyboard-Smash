@@ -39,14 +39,16 @@ IS_DEV_MODE = (os.environ.get("KEYBOARD_MASHER_DEV") == "1") and not IS_FROZEN
 
 # Persistent dev-mode log. All _dev_log calls append here so stress-test
 # PASS/FAIL, luminance breaches, frame-drop bursts, palette swaps, and HUD
-# toggles can be audited after the fact.
-DEV_LOG_PATH = Path(__file__).resolve().parent / "dev_log.txt"
+# toggles can be audited after the fact. Lives under ./logs/ so the whole
+# directory can be ignored with one .gitignore line.
+DEV_LOG_DIR = Path(__file__).resolve().parent / "logs"
+DEV_LOG_PATH = DEV_LOG_DIR / "dev_log.txt"
 
 
 def _dev_log(message: str) -> None:
     """
-    Write a dev-mode diagnostic to stderr AND dev_log.txt. No-op in release.
-    Each line is timestamped so multiple runs interleave cleanly.
+    Write a dev-mode diagnostic to stderr AND logs/dev_log.txt. No-op in
+    release. Each line is timestamped so multiple runs interleave cleanly.
     """
     if not IS_DEV_MODE:
         return
@@ -57,6 +59,7 @@ def _dev_log(message: str) -> None:
     except OSError:
         pass
     try:
+        DEV_LOG_DIR.mkdir(parents=True, exist_ok=True)
         with DEV_LOG_PATH.open("a", encoding="utf-8") as file:
             file.write(line)
     except OSError:
