@@ -3187,6 +3187,12 @@ def main() -> None:
 
     try:
         pygame.init()
+        # Allocate generously so Music's 0.6 s notes don't cut each other off
+        # under rapid input. At 30 Hz keypresses (worst case via F7 stress
+        # test) up to ~18 notes can overlap. Default 8 channels would steal
+        # older notes mid-decay, producing audible chops; 32 covers the
+        # overlap with headroom for EmojiTheme's 0.12 s pops too.
+        pygame.mixer.set_num_channels(32)
 
         NOTE_SOUNDS = build_note_sounds()
         POP_WAVE = build_pop_wave()
