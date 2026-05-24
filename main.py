@@ -2334,6 +2334,83 @@ def keyboard_event_to_pygame_key(event: Any) -> int | None:
         return None
 
 
+# --- Hard-kill recovery -----------------------------------------------------
+#
+# atexit only fires on graceful interpreter shutdown. If the user kills the
+# process via Task Manager (or the OS does, e.g. on power loss), the
+# registry / SPI suppressions remain in place: the Win key stays blocked,
+# Win+L stays disabled, toast notifications stay muted, FilterKeys etc.
+# stay zeroed. These can leave the parent locked out of normal shortcuts.
+#
+# Mitigation: a marker file is written when a session begins and deleted
+# when it ends cleanly. If the marker is present at next startup, the
+# previous session did not clean up — we then best-effort delete our three
+# registry values. (Accessibility SPI originals can't be recovered because
+# we never persisted them; the user would need to re-enable FilterKeys
+# manually if they had it on. Documented in Phase 1.05.)
+
+SESSION_DIRTY_PATH = Path(__file__).resolve().parent / ".session_dirty"
+
+_RECOVERY_REGISTRY_KEYS: tuple[tuple[str, str], ...] = (
+    (r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoWinKeys"),
+    (r"Software\Microsoft\Windows\CurrentVersion\Policies\System", "DisableLockWorkstation"),
+    (
+        r"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings",
+        "NOC_GLOBAL_SETTING_TOASTS_ENABLED",
+    ),
+)
+
+
+def _mark_session_dirty() -> None:
+    try:
+        SESSION_DIRTY_PATH.touch()
+    except OSError:
+        pass
+
+
+def _clear_session_dirty() -> None:
+    try:
+        SESSION_DIRTY_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def recover_dirty_session() -> bool:
+    """
+    If a marker from a hard-killed prior session is present, best-effort
+    delete our three registry values so the Win key / Win+L / notifications
+    return to their default (Windows-managed) behavior. Returns True if
+    recovery ran, False if no marker was present. Safe to call on
+    non-Windows or with no admin rights — failures are silent.
+    """
+    if not SESSION_DIRTY_PATH.exists():
+        return False
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            for path, value_name in _RECOVERY_REGISTRY_KEYS:
+                try:
+                    with winreg.OpenKey(
+                        winreg.HKEY_CURRENT_USER,
+                        path,
+                        0,
+                        winreg.KEY_WRITE,
+                    ) as key:
+                        try:
+                            winreg.DeleteValue(key, value_name)
+                        except FileNotFoundError:
+                            pass
+                except OSError:
+                    pass
+            _broadcast_setting_change()
+        except ImportError:
+            pass
+    _clear_session_dirty()
+    _dev_log("recovered stale session: cleared NoWinKeys / DisableLockWorkstation / toast policy")
+    return True
+
+
 def leave_playing_state(
     notification_suppressor: NotificationSuppressor,
     keyboard_lockdown: KeyboardLockdown,
@@ -2348,6 +2425,7 @@ def leave_playing_state(
     lock_workstation_suppressor.restore()
     accessibility_keys_suppressor.restore()
     notification_suppressor.restore()
+    _clear_session_dirty()
 
 
 # Populated in main(); used by try/finally and atexit (idempotent cleanup).
@@ -2385,6 +2463,10 @@ def enter_playing_state(
     accessibility_keys_suppressor.enable()
     if suppress:
         notification_suppressor.enable()
+    # Drop a marker so we can detect a hard-kill (Task Manager) on the next
+    # launch and undo the registry suppressions even though atexit did not
+    # get a chance to run.
+    _mark_session_dirty()
 
 
 # -----------------------------------------------------------------------------
@@ -3165,6 +3247,11 @@ def main() -> None:
         DEV_STATE = DevState()
         init_dev_palette()
         _dev_trace("dev mode active")
+
+    # If the previous run was hard-killed, undo any registry suppressions
+    # before we construct new ones (otherwise their enable() would capture
+    # the stale-suppressed value as the 'original' to restore).
+    recover_dirty_session()
 
     pygame.mixer.pre_init(SAMPLE_RATE, -16, 2, 512)
 
