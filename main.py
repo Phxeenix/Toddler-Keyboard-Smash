@@ -614,12 +614,17 @@ EMOJI_LIFETIME = 3.0  # seconds until fully faded
 EMOJI_SIZE_MIN = 48
 EMOJI_SIZE_MAX = 96
 
-# Cap how often a single held key (Windows auto-repeats at ~30 Hz) can spawn
-# a new emoji + confetti burst + pop. Keeps luminance-probe Hz comfortably
-# under the 3.0 cap when a toddler holds a key. Audio and visuals are
-# throttled together — never decouple (see memory/audio-visual-coupling).
-EMOJI_SPAWN_RATE_HZ = 15.0
-EMOJI_MIN_SPAWN_INTERVAL = 1.0 / EMOJI_SPAWN_RATE_HZ
+# Token-bucket throttle for Emoji spawns. Lets natural rhythmic tapping
+# (which routinely hits 20-30 Hz in short bursts) feel fully responsive
+# while still capping sustained held-key auto-repeat at a safe luminance
+# rate. Bucket starts full and refills continuously; each accepted spawn
+# costs 1 token. Sustained 30 Hz hold drains the bucket in ~0.67 s, then
+# events arrive faster than they refill and excess get dropped — but the
+# 1-second probe window only ever sees BURST_CAPACITY + REFILL_RATE worth
+# of events, which math'd out at 20 + 5 ≈ 25 events / sec → ~2.9 Hz, just
+# under the 3.0 photosensitivity cap.
+EMOJI_BURST_CAPACITY = 10.0   # quick taps in this many can all pass
+EMOJI_REFILL_RATE_HZ = 15.0   # sustained-hold ceiling
 
 EMOJI_CHARS = (
     "🐶", "🐱", "🐰", "🐻", "🐼", "🦊", "🐸", "🐵",
@@ -1519,8 +1524,9 @@ class EmojiTheme(Theme):
         self._size_min = max(16, int(EMOJI_SIZE_MIN * scale))
         self._size_max = max(self._size_min, int(EMOJI_SIZE_MAX * scale))
         self._background = EmojiBackground(screen)
-        # Last-accepted spawn timestamp; held keys throttle through this.
-        self._last_spawn_at = 0.0
+        # Token bucket for spawn throttle (see EMOJI_BURST_CAPACITY).
+        self._spawn_tokens: float = EMOJI_BURST_CAPACITY
+        self._spawn_tokens_last_tick: float = time.monotonic()
 
     def _on_clear(self) -> None:
         self.emojis.clear()
@@ -1554,13 +1560,18 @@ class EmojiTheme(Theme):
 
     def on_keypress(self, key: int) -> None:
         del key
+        # Token-bucket throttle: refill since last tick, drop if empty.
+        # Audio + visual stay coupled — either both happen or neither does.
         now = time.monotonic()
-        # Throttle held-key auto-repeats: drop the entire event (audio AND
-        # visual together) if the previous spawn was less than 1/15s ago.
-        # Quick taps slower than the cap go through every time.
-        if now - self._last_spawn_at < EMOJI_MIN_SPAWN_INTERVAL:
+        elapsed = now - self._spawn_tokens_last_tick
+        self._spawn_tokens_last_tick = now
+        self._spawn_tokens = min(
+            EMOJI_BURST_CAPACITY,
+            self._spawn_tokens + elapsed * EMOJI_REFILL_RATE_HZ,
+        )
+        if self._spawn_tokens < 1.0:
             return
-        self._last_spawn_at = now
+        self._spawn_tokens -= 1.0
 
         play_pop_sound()
 
