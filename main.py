@@ -887,8 +887,27 @@ def get_emoji_confetti_palette() -> tuple[tuple[int, int, int], ...]:
 # -----------------------------------------------------------------------------
 
 
+def _shape_for_mixer(mono_samples: np.ndarray) -> np.ndarray:
+    """
+    Reshape a mono int16 array to match the active mixer's channel count.
+    pygame.mixer.init can silently fall back to mono if the audio driver
+    doesn't accept the requested stereo format (AUDIO_ALLOW_CHANNELS_CHANGE
+    is on by default). pygame.sndarray.make_sound requires the array's
+    dimensionality to match the mixer exactly — 1D for mono, 2D for stereo
+    — or it raises ValueError. Returning the right shape keeps audio
+    working on machines where stereo wasn't negotiated.
+    """
+    init = pygame.mixer.get_init()
+    if init is None:
+        return mono_samples
+    channels = init[2]
+    if channels >= 2:
+        return np.column_stack([mono_samples] * channels)
+    return mono_samples
+
+
 def _generate_note_sound(frequency: float) -> pygame.mixer.Sound:
-    """Sine bell: 10 ms attack, exponential decay, 16-bit stereo."""
+    """Sine bell: 10 ms attack, exponential decay. Shape adapts to mixer."""
     n_samples = int(SAMPLE_RATE * NOTE_DURATION)
     t = np.linspace(0.0, NOTE_DURATION, n_samples, endpoint=False)
     wave = np.sin(2.0 * np.pi * frequency * t)
@@ -902,8 +921,8 @@ def _generate_note_sound(frequency: float) -> pygame.mixer.Sound:
 
     peak = float(np.max(np.abs(wave))) or 1.0
     mono = (wave / peak * 32767 * 0.95).astype(np.int16)
-    stereo = np.column_stack([mono, mono])
-    sound = pygame.sndarray.make_sound(stereo)
+    samples = _shape_for_mixer(mono)
+    sound = pygame.sndarray.make_sound(samples)
     sound.set_volume(1.0)
     return sound
 
@@ -964,8 +983,8 @@ def play_pop_sound(pitch_factor: float | None = None) -> None:
     shifted = _resample_pitch(POP_WAVE, pitch_factor)
     peak = float(np.max(np.abs(shifted))) or 1.0
     mono = (shifted / peak * 32767 * 0.95).astype(np.int16)
-    stereo = np.column_stack([mono, mono])
-    sound = pygame.sndarray.make_sound(stereo)
+    samples = _shape_for_mixer(mono)
+    sound = pygame.sndarray.make_sound(samples)
     sound.set_volume(CURRENT_PLAY_VOLUME)
     sound.play()
 
