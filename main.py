@@ -562,6 +562,10 @@ DEV_PALETTE_POLL_SEC = 0.5
 
 BACKGROUND_COLOR = (0, 0, 0)
 SETUP_BACKGROUND_COLOR = (26, 26, 46)  # #1a1a2e deep navy
+# Emoji play background — muted Montessori-calm neutral (slightly cooler
+# than the setup screen so the two spaces feel distinct without competing
+# with the colorful emojis or the Phase 2.03 drifting confetti layer).
+EMOJI_BG_COLOR = (26, 26, 36)  # #1a1a24
 SETUP_TILE_BG = (45, 45, 68)          # #2d2d44
 SETUP_TILE_BG_ACTIVE = (58, 58, 88)
 SETUP_ACCENT = (124, 106, 247)        # #7c6af7
@@ -1165,13 +1169,14 @@ class MusicBackground(Background):
 
 class EmojiBackground(Background):
     """
-    Calm dark base for the Emoji theme. Identical to the inherited
-    BACKGROUND_COLOR fill for now; Phase 1.03 tunes the color and Phase 2.03
-    layers drifting confetti behind everything.
+    Calm Montessori-neutral base for the Emoji theme. Replaces the previous
+    pure-black BACKGROUND_COLOR fill so the emojis feel like they're sitting
+    on a soft dark canvas rather than a void. Phase 2.03 layers drifting
+    confetti on top of this fill.
     """
 
     def draw(self, screen: pygame.Surface) -> None:
-        screen.fill(BACKGROUND_COLOR)
+        screen.fill(EMOJI_BG_COLOR)
 
 
 # -----------------------------------------------------------------------------
