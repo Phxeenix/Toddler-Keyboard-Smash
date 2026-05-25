@@ -11,6 +11,7 @@ import json
 import math
 import queue
 import random
+import os
 import sys
 import threading
 import time
@@ -28,11 +29,11 @@ import pygame
 
 BACKGROUND_COLOR = (0, 0, 0)
 SETUP_BACKGROUND_COLOR = (26, 26, 46)  # #1a1a2e deep navy
-SETUP_TILE_BG = (45, 45, 68)          # #2d2d44
-SETUP_TILE_BG_ACTIVE = (58, 58, 88)
+SETUP_TILE_BG = (61, 61, 92)           # #3d3d5c — lightened per user request
+SETUP_TILE_BG_ACTIVE = (78, 78, 110)
 SETUP_ACCENT = (124, 106, 247)        # #7c6af7
-SETUP_SUBTITLE_COLOR = (150, 150, 165)
-SETUP_ON_GRADIENT_TEXT_COLOR = (74, 74, 106)  # #4a4a6a — tagline & footer on animated bg
+SETUP_SUBTITLE_COLOR = (185, 185, 200)
+SETUP_ON_GRADIENT_TEXT_COLOR = (255, 255, 255)  # now white; set_alpha controls opacity
 SETUP_TAGLINE_TEXT = "A safe keyboard playground for little ones."
 SETUP_FOOTER_HINT_TEXT = "Press ESC to quit or click X in the corner"
 SETUP_BG_CYCLE_SEC = 8.0
@@ -52,6 +53,19 @@ SETUP_SLIDER_TRACK_HEIGHT = 6
 SETUP_SLIDER_HANDLE_RADIUS = 9
 SETUP_SLIDER_ROW_HEIGHT = 36
 SETUP_SLIDER_GAP = 18
+SETUP_CAT_PILL_WIDTH = 100
+SETUP_CAT_PILL_HEIGHT = 32
+SETUP_CAT_PILL_GAP = 10
+SETUP_CAT_FADE_SEC = 0.15
+_CAT_NAMES: tuple[str, ...] = ("All", "Animals", "Food", "Space", "Faces")
+
+# Instrument selector pills (Music tile).  Slightly wider to fit "Xylophone".
+SETUP_INSTR_PILL_WIDTH = 110
+SETUP_INSTR_PILL_HEIGHT = 32
+SETUP_INSTR_PILL_GAP = 10
+_INSTRUMENT_NAMES: tuple[str, ...] = ("Piano", "Xylophone", "Synth", "Harp")
+# Display name → INSTRUMENT_SOUNDS key
+_INSTRUMENT_KEY: dict[str, str] = {n: n.lower() for n in _INSTRUMENT_NAMES}
 SETUP_TRACK_COLOR = (45, 45, 68)
 DEFAULT_VOLUME = 0.6
 DEFAULT_INTENSITY = 0.7
@@ -67,12 +81,33 @@ THEME_LABEL_DURATION = 2.0  # seconds to show theme name after switching
 TARGET_FPS = 60
 FOREGROUND_CHECK_INTERVAL_SEC = 0.5
 
+# Idle animation — activates after no keypresses for IDLE_THRESHOLD_SEC.
+IDLE_THRESHOLD_SEC = 30.0
+IDLE_TRANSITION_SEC = 0.5          # seconds to blend in/out idle effects
+IDLE_GHOST_RIPPLE_INTERVAL_SEC = 3.0
+IDLE_GHOST_RIPPLE_ALPHA = int(round(255 * 0.30))   # 30 % opacity
+IDLE_MUSIC_SPEED_FACTOR = 2.0      # bg transitions 2× slower when idle
+IDLE_EMOJI_DRIFT_FACTOR = 0.40     # bg particles drift at 40 % speed when idle
+IDLE_EMOJI_DIM_AMOUNT = 0.15       # screen dims by 15 % at full idle (= 85 % brightness)
+
+# Stress test — developer / parent tool (F7 from SETUP only).
+STRESS_TEST_DURATION_SEC = 15.0
+STRESS_TEST_FLASH_LIMIT_HZ = 3.0        # WCAG 2.3.1 general-flash limit
+STRESS_TEST_KEY_INTERVAL_SEC = 0.05     # 20 synthetic keys/sec (worst-case)
+STRESS_TEST_THEME_INTERVAL_SEC = 0.5    # alternate themes this often
+STRESS_BRIGHTNESS_THRESHOLD = 0.10      # 10 % relative-luminance change = one flash half
+STRESS_RED_R_MIN = 150                  # avg red must exceed this
+STRESS_RED_RATIO = 1.5                  # and dominate green/blue by this factor
+STRESS_SAMPLE_SIZE = (80, 45)           # downsample target for fast luma measurement
+_LOG_APP_DIR = "KeyboardMasher"
+_LOG_SUBDIR = "logs"
+
 # Per-theme caps (replace the old global MAX_SHAPES limit).
 MAX_RIPPLES = 30
 MAX_EMOJIS = 15
 
 EMOJI_FONT_NAME = "Segoe UI Emoji"
-EMOJI_LIFETIME = 3.0  # seconds until fully faded
+EMOJI_LIFETIME = 4.0  # seconds until fully faded
 EMOJI_SIZE_MIN = 48
 EMOJI_SIZE_MAX = 96
 
@@ -81,6 +116,33 @@ EMOJI_CHARS = (
     "⭐", "🌟", "✨", "🎈", "🌈", "🎉",
     "🍎", "🍌", "🍕", "🍩", "🎂", "❤️",
 )
+
+EMOJI_PACKS: dict[str, list[str]] = {
+    "All": [
+        "🐶","🐱","🐭","🐹","🐰","🦊","🐻","🐼","🐨","🐯","🦁","🐮","🐷","🐸","🐵",
+        "🦄","🐔","🐧","🦆","🦋","🐢","🐙","🦀","🐠","🐬",
+        "🍎","🍌","🍓","🍒","🍕","🍔","🌮","🍩","🍪","🎂","🍦","🧁","🍫","🍿",
+        "🥑","🍉","🍇",
+        "⭐","🌟","💫","✨","🌙","☀️","🪐","🌈","⚡","🔥","❄️","🌊",
+        "😊","😂","🥰","😎","🤩","🥳","😜","👻","👾","🤖",
+    ],
+    "Animals": [
+        "🐶","🐱","🐭","🐹","🐰","🦊","🐻","🐼","🐨","🐯","🦁","🐮","🐷","🐸","🐵",
+        "🦄","🐔","🐧","🦆","🦋","🐢","🐙","🦀","🐠","🐬","🐳","🦓","🦒","🦘","🦔",
+    ],
+    "Food": [
+        "🍎","🍌","🍓","🍒","🍕","🍔","🌮","🍩","🍪","🎂","🍦","🧁","🍫","🍿",
+        "🥑","🍉","🍇","🍑","🥝","🍋","🍊","🍍","🥭","🍆","🥕","🌽","🍄","🧀","🍳","🥞",
+    ],
+    "Space": [
+        "⭐","🌟","💫","✨","🌙","☀️","🪐","🌈","⚡","🔥","❄️","🌊",
+        "☁️","🌪️","🌤️","🌍","🌕","🌠","🌌","🛸","🚀","🌋","🏔️","💥",
+    ],
+    "Faces": [
+        "😊","😂","🥰","😎","🤩","🥳","😜","👻","👾","🤖",
+        "🥹","😇","🤗","🥸","🤡","👽","💀","🎃","🤠","🥺","😤","🤣","😍","🤑","🫶",
+    ],
+}
 
 # Curated per-theme base colors (RGB). Intensity slider blends low → white, high → full.
 MUSIC_THEME_PALETTE: tuple[tuple[int, int, int], ...] = (
@@ -91,6 +153,57 @@ MUSIC_THEME_PALETTE: tuple[tuple[int, int, int], ...] = (
     (255, 236, 210),  # #ffecd2
     (161, 196, 253),  # #a1c4fd
     (212, 252, 121),  # #d4fc79
+    (150, 230, 161),  # #96e6a1
+)
+# Per-instrument ripple palettes
+SYNTH_RIPPLE_PALETTE: tuple[tuple[int, int, int], ...] = (
+    (116, 192, 252),  # #74c0fc — sky blue
+    (169, 227,  75),  # #a9e34b — electric lime
+    (218, 119, 242),  # #da77f2 — vivid purple
+)
+HARP_RIPPLE_PALETTE: tuple[tuple[int, int, int], ...] = (
+    (255, 212,  59),  # #ffd43b — warm gold
+    (255, 169,  77),  # #ffa94d — soft amber
+    (255, 135, 135),  # #ff8787 — coral pink
+)
+# Xylophone ping flash (small white circle at ripple origin)
+XYLOPHONE_PING_DURATION = 0.08   # seconds for the flash to fade
+XYLOPHONE_PING_RADIUS   = 12     # pixels
+# Nighttime city skyline constants (MusicTheme background layer).
+SKYLINE_SEED = 42                                   # fixed seed → same layout every run
+SKYLINE_BUILD_CLR: tuple[int, int, int] = (26, 26, 42)   # #1a1a2a — charcoal
+SKYLINE_AURORA_ALPHA = 153   # 60 % of 255 — aurora blended over the city
+# Nighttime sky color-shifting palette (slow crossfade, same mechanic as aurora).
+_SKYLINE_BG_RAW: tuple[tuple[int, int, int], ...] = (
+    (13,  27,  42),   # #0d1b2a — deep navy
+    (27,  42,  74),   # #1b2a4a — midnight blue
+    (45,  27, 105),   # #2d1b69 — dark purple
+    (26,  26,  78),   # #1a1a4e — deep indigo
+    (10,  22,  40),   # #0a1628 — near-black
+)
+# These colors are already dark nighttime tones; leave them untouched.
+_SKYLINE_BG_COLORS: tuple[tuple[int, int, int], ...] = _SKYLINE_BG_RAW
+SKYLINE_WIN_W  = 6
+SKYLINE_WIN_H  = 8
+SKYLINE_WIN_GAP_X = 13      # horizontal spacing between window columns
+SKYLINE_WIN_GAP_Y = 14      # vertical spacing between window rows
+SKYLINE_WIN_LIT   = 0.30    # fraction of windows lit at spawn
+SKYLINE_WIN_COLORS: tuple[tuple[int, int, int], ...] = (
+    (255, 200,  80),  # warm yellow
+    (255, 240, 160),  # pale cream
+    (255, 170,  60),  # amber
+)
+SKYLINE_STAR_DIM    = 55
+SKYLINE_STAR_BRIGHT = 220
+SKYLINE_STAR_SPEED  = 1.6   # radians per second (twinkle frequency)
+
+# Ordered sequence for the background color cycle (subset of palette).
+MUSIC_BG_PALETTE: tuple[tuple[int, int, int], ...] = (
+    (168, 237, 234),  # #a8edea
+    (195, 207, 226),  # #c3cfe2
+    (224, 195, 252),  # #e0c3fc
+    (161, 196, 253),  # #a1c4fd
+    (254, 214, 227),  # #fed6e3
     (150, 230, 161),  # #96e6a1
 )
 EMOJI_CONFETTI_PALETTE: tuple[tuple[int, int, int], ...] = (
@@ -159,6 +272,7 @@ PITCH_SHIFT_MAX = 1.2   # +20 %
 
 # Populated at startup after mixer init.
 NOTE_SOUNDS: list[pygame.mixer.Sound] = []
+INSTRUMENT_SOUNDS: dict[str, list[pygame.mixer.Sound]] = {}
 POP_WAVE: np.ndarray | None = None
 CURRENT_PLAY_VOLUME = DEFAULT_VOLUME  # updated by apply_session_volume()
 
@@ -192,6 +306,86 @@ def _generate_note_sound(frequency: float) -> pygame.mixer.Sound:
 def build_note_sounds() -> list[pygame.mixer.Sound]:
     """Generate and cache all pentatonic note samples."""
     return [_generate_note_sound(freq) for freq in PENTATONIC_FREQS]
+
+
+# ---------------------------------------------------------------------------
+# Multi-instrument sound generators
+# ---------------------------------------------------------------------------
+
+def _pcm_to_sound(wave: np.ndarray, attack_sec: float, decay_rate: float) -> pygame.mixer.Sound:
+    """Apply attack ramp + exponential decay to a raw wave, return a Sound."""
+    n = len(wave)
+    t = np.arange(n, dtype=np.float64) / SAMPLE_RATE
+    attack_n = int(SAMPLE_RATE * attack_sec)
+    ramp = np.ones(n, dtype=np.float64)
+    if attack_n > 0:
+        ramp[:attack_n] = np.linspace(0.0, 1.0, attack_n)
+    wave = wave * ramp * np.exp(-decay_rate * t)
+    peak = float(np.max(np.abs(wave))) or 1.0
+    mono = (wave / peak * 32767 * 0.95).astype(np.int16)
+    stereo = np.column_stack([mono, mono])
+    s = pygame.sndarray.make_sound(stereo)
+    s.set_volume(1.0)
+    return s
+
+
+def _gen_piano(freq: float) -> pygame.mixer.Sound:
+    """Sine wave — 10 ms attack, 0.6 s exp decay. Warm and familiar."""
+    dur = 0.6
+    n = int(SAMPLE_RATE * dur)
+    t = np.linspace(0.0, dur, n, endpoint=False)
+    wave = np.sin(2.0 * np.pi * freq * t)
+    return _pcm_to_sound(wave, attack_sec=0.010, decay_rate=7.5)
+
+
+def _gen_xylophone(freq: float) -> pygame.mixer.Sound:
+    """Sine + 2nd harmonic (30 %) — 5 ms attack, 0.25 s decay. Bright and percussive."""
+    dur = 0.25
+    n = int(SAMPLE_RATE * dur)
+    t = np.linspace(0.0, dur, n, endpoint=False)
+    wave = (
+        np.sin(2.0 * np.pi * freq * t)
+        + 0.30 * np.sin(2.0 * np.pi * 2.0 * freq * t)
+    )
+    return _pcm_to_sound(wave, attack_sec=0.005, decay_rate=20.0)
+
+
+def _gen_synth(freq: float) -> pygame.mixer.Sound:
+    """Three detuned square waves (±3 cents) — 8 ms attack, 0.8 s decay. Fun and buzzy."""
+    dur = 0.8
+    n = int(SAMPLE_RATE * dur)
+    t = np.linspace(0.0, dur, n, endpoint=False)
+    shift = 2.0 ** (3.0 / 1200.0) - 1.0          # 3-cent ratio offset ≈ 0.001732
+    sq1 = np.sign(np.sin(2.0 * np.pi * freq * t))
+    sq2 = np.sign(np.sin(2.0 * np.pi * freq * (1.0 + shift) * t))
+    sq3 = np.sign(np.sin(2.0 * np.pi * freq * (1.0 - shift) * t))
+    wave = 0.50 * sq1 + 0.25 * sq2 + 0.25 * sq3
+    return _pcm_to_sound(wave, attack_sec=0.008, decay_rate=5.5)
+
+
+def _gen_harp(freq: float) -> pygame.mixer.Sound:
+    """Triangle wave — 15 ms attack, 1.2 s decay. Airy and magical."""
+    dur = 1.2
+    n = int(SAMPLE_RATE * dur)
+    t = np.linspace(0.0, dur, n, endpoint=False)
+    wave = (2.0 / np.pi) * np.arcsin(np.clip(np.sin(2.0 * np.pi * freq * t), -1.0, 1.0))
+    return _pcm_to_sound(wave, attack_sec=0.015, decay_rate=4.0)
+
+
+_INSTRUMENT_GENERATORS: dict[str, object] = {
+    "piano":     _gen_piano,
+    "xylophone": _gen_xylophone,
+    "synth":     _gen_synth,
+    "harp":      _gen_harp,
+}
+
+
+def build_instrument_sounds() -> dict[str, list[pygame.mixer.Sound]]:
+    """Generate all four instrument sets for every pentatonic note."""
+    return {
+        name: [fn(freq) for freq in PENTATONIC_FREQS]   # type: ignore[operator]
+        for name, fn in _INSTRUMENT_GENERATORS.items()
+    }
 
 
 def _generate_pop_wave() -> np.ndarray:
@@ -337,10 +531,33 @@ class Theme(ABC):
         self._screen_w, self._screen_h = screen.get_size()
         self.intensity = intensity
         self._intensity_scale = intensity_scale(intensity)
+        self._time_since_keypress: float = 0.0
+        self._idle_factor: float = 0.0
+        self._idle_target: float = 0.0
 
     def clear(self) -> None:
         """Reset theme state when switching themes."""
+        self._time_since_keypress = 0.0
+        self._idle_factor = 0.0
+        self._idle_target = 0.0
         self._on_clear()
+
+    def _advance_idle(self, dt: float) -> None:
+        """Advance the idle timer and smoothly drive _idle_factor toward its target.
+        Call once at the top of update() in every subclass."""
+        self._time_since_keypress += dt
+        if self._time_since_keypress >= IDLE_THRESHOLD_SEC:
+            self._idle_target = 1.0
+        rate = 1.0 / IDLE_TRANSITION_SEC
+        if self._idle_target > self._idle_factor:
+            self._idle_factor = min(self._idle_target, self._idle_factor + rate * dt)
+        else:
+            self._idle_factor = max(self._idle_target, self._idle_factor - rate * dt)
+
+    def _on_keypress_idle(self) -> None:
+        """Reset idle state on any keypress.  Call at the top of on_keypress()."""
+        self._time_since_keypress = 0.0
+        self._idle_target = 0.0
 
     @abstractmethod
     def _on_clear(self) -> None:
@@ -368,6 +585,7 @@ class Theme(ABC):
 # MusicTheme — expanding, fading ripples
 # -----------------------------------------------------------------------------
 
+BG_TRANSITION_DURATION_SEC = 8.0
 SCALE_IN_DURATION_SEC = 0.12
 EMOJI_BOUNCE_DURATION_SEC = 0.08
 SPARKLE_LIFETIME_SEC = 0.4
@@ -431,6 +649,46 @@ class SparkleParticle:
         self.color = color
 
 
+def _desaturate(rgb: tuple[int, int, int], amount: float) -> tuple[int, int, int]:
+    """Blend rgb toward its average gray by `amount` (0 = unchanged, 1 = full gray)."""
+    r, g, b = rgb
+    gray = (r + g + b) / 3.0
+    t = max(0.0, min(1.0, amount))
+    return (
+        int(round(gray * t + r * (1.0 - t))),
+        int(round(gray * t + g * (1.0 - t))),
+        int(round(gray * t + b * (1.0 - t))),
+    )
+
+
+def _darken(rgb: tuple[int, int, int], amount: float) -> tuple[int, int, int]:
+    """Multiply each channel by (1 - amount); amount=0.35 → 35 % darker."""
+    f = max(0.0, 1.0 - max(0.0, min(1.0, amount)))
+    return (
+        int(round(rgb[0] * f)),
+        int(round(rgb[1] * f)),
+        int(round(rgb[2] * f)),
+    )
+
+
+# Background cycle colors: 60 % desaturated then darkened 35 % so they read as
+# a faint color tint over near-black — ripples and sparkles stay the brightest
+# elements on screen at all times.
+_MUSIC_BG_COLORS: tuple[tuple[int, int, int], ...] = tuple(
+    _darken(_desaturate(c, 0.60), 0.35) for c in MUSIC_BG_PALETTE
+)
+
+
+def _music_bg_transition_duration(intensity: float) -> float:
+    """Map intensity 0–1 to background color-cycle duration in seconds.
+    Piecewise linear: 16 s at 0.0 → 8 s at 0.5 → 5 s at 1.0.
+    """
+    t = max(0.0, min(1.0, intensity))
+    if t <= 0.5:
+        return 16.0 + (8.0 - 16.0) * (t / 0.5)
+    return 8.0 + (5.0 - 8.0) * ((t - 0.5) / 0.5)
+
+
 class MusicTheme(Theme):
     """Soft pastel ripples that expand and fade on each keypress."""
 
@@ -445,20 +703,149 @@ class MusicTheme(Theme):
         screen: pygame.Surface,
         note_sounds: list[pygame.mixer.Sound] | None = None,
         intensity: float = DEFAULT_INTENSITY,
+        active_instrument: str = "piano",
     ) -> None:
         super().__init__(screen, intensity)
         self.ripples: list[Ripple] = []
         self.sparkles: list[SparkleParticle] = []
-        self._note_sounds = note_sounds if note_sounds is not None else NOTE_SOUNDS
+        self._active_instrument: str = active_instrument
+        self._note_sounds = (
+            INSTRUMENT_SOUNDS.get(active_instrument)
+            or (note_sounds if note_sounds is not None else NOTE_SOUNDS)
+        )
         scale = self._intensity_scale
         self._max_ripples = max(1, int(MAX_RIPPLES * scale))
-        self._radius_growth = self.RADIUS_GROWTH * scale
         self._ring_width = max(3, int(self.RING_WIDTH * scale))
-        self._initial_radius = 8.0 * scale
+        self._bg_idx = 0
+        self._bg_t = 0.0
+        self._bg_transition_sec = _music_bg_transition_duration(intensity)
+        self._ghost_timer = 0.0
+        # pings are (x, y, age) entries added by xylophone on each keypress
+        self._pings: list[tuple[int, int, float]] = []
+        self._apply_instrument_style()
+        # Nighttime city skyline — built once, animated cheaply
+        self._city_time: float = 0.0
+        self._sky_idx: int = 0
+        self._sky_t: float = 0.0
+        self._sky_duration: float = _music_bg_transition_duration(intensity)
+        self._city_rng = random.Random(99)      # separate RNG for runtime flickering
+        self._city_bg_surf: pygame.Surface | None = None
+        self._aurora_surf:  pygame.Surface | None = None
+        self._stars:      list[tuple[float, float, float]] = []
+        self._star_surfs: list[pygame.Surface] = []
+        # Each window entry: [rect, lit, timer, interval, color]
+        self._windows: list[list] = []
+        self._build_skyline()
+
+    @property
+    def active_instrument(self) -> str:
+        return self._active_instrument
+
+    @active_instrument.setter
+    def active_instrument(self, value: str) -> None:
+        self._active_instrument = value
+        sounds = INSTRUMENT_SOUNDS.get(value)
+        if sounds:
+            self._note_sounds = sounds
+        self._apply_instrument_style()
+
+    def _apply_instrument_style(self) -> None:
+        """Derive visual parameters from the current active_instrument."""
+        scale = self._intensity_scale
+        instr = self._active_instrument
+        # Start from piano defaults, then override per instrument
+        self._radius_growth        = self.RADIUS_GROWTH * scale
+        self._initial_radius       = 8.0 * scale
+        self._ripple_palette: tuple[tuple[int, int, int], ...] = MUSIC_THEME_PALETTE
+        self._sparkle_lifetime_sec: float = SPARKLE_LIFETIME_SEC
+        self._draw_square_ripple: bool = False
+        if instr == "xylophone":
+            self._radius_growth  = self.RADIUS_GROWTH * scale * 1.6
+            self._initial_radius = 5.0 * scale
+        elif instr == "synth":
+            self._ripple_palette     = SYNTH_RIPPLE_PALETTE
+            self._draw_square_ripple = True
+        elif instr == "harp":
+            self._radius_growth        = self.RADIUS_GROWTH * scale * 0.65
+            self._initial_radius       = 14.0 * scale
+            self._ripple_palette       = HARP_RIPPLE_PALETTE
+            self._sparkle_lifetime_sec = SPARKLE_LIFETIME_SEC * 1.5
+
+    # ------------------------------------------------------------------
+    # Skyline helpers
+    # ------------------------------------------------------------------
+
+    def _build_skyline(self) -> None:
+        """Pre-bake static sky+buildings surface, generate stars and windows."""
+        w, h = self._screen_w, self._screen_h
+        rng = random.Random(SKYLINE_SEED)
+
+        # ---- Building silhouette surface (SRCALPHA — sky pixels are transparent) --
+        # The sky color is painted each frame as a solid fill BEFORE this blit,
+        # so the transparent areas show the color-shifting sky underneath.
+        self._city_bg_surf = pygame.Surface((w, h), pygame.SRCALPHA)
+
+        # ---- Buildings + windows ----------------------------------------
+        n_buildings = rng.randint(12, 18)
+        spacing = w / n_buildings
+        self._windows = []
+        for i in range(n_buildings):
+            bw = rng.randint(40, 120)
+            bh = rng.randint(80, 280)
+            bx = int(i * spacing + rng.uniform(-8, 8))
+            bx = max(0, min(w - bw, bx))
+            by = h - bh
+            pygame.draw.rect(
+                self._city_bg_surf, SKYLINE_BUILD_CLR,
+                (bx, by, bw, bh),
+            )
+            # Window grid for this building
+            row_y = by + SKYLINE_WIN_GAP_Y
+            while row_y + SKYLINE_WIN_H < h - 4:
+                col_x = bx + SKYLINE_WIN_GAP_X
+                while col_x + SKYLINE_WIN_W < bx + bw - SKYLINE_WIN_GAP_X // 2:
+                    lit   = rng.random() < SKYLINE_WIN_LIT
+                    # Each window gets its own random phase so they never all blink together
+                    timer = rng.uniform(0.0, rng.uniform(6.0, 10.0))
+                    color = rng.choice(SKYLINE_WIN_COLORS)
+                    self._windows.append(
+                        [pygame.Rect(col_x, row_y, SKYLINE_WIN_W, SKYLINE_WIN_H),
+                         lit, timer, color]
+                    )
+                    col_x += SKYLINE_WIN_W + SKYLINE_WIN_GAP_X
+                row_y += SKYLINE_WIN_H + SKYLINE_WIN_GAP_Y
+
+        # ---- Stars in sky area ------------------------------------------
+        n_stars = rng.randint(40, 60)
+        self._stars = [
+            (
+                rng.uniform(4.0, float(w - 4)),
+                rng.uniform(4.0, float(h) * 0.65),
+                rng.uniform(0.0, 2.0 * math.pi),   # per-star phase offset
+            )
+            for _ in range(n_stars)
+        ]
+        # Pre-allocate tiny 2×2 surfaces (no per-frame allocation)
+        self._star_surfs = []
+        for _ in self._stars:
+            ss = pygame.Surface((2, 2))
+            ss.fill((210, 220, 255))     # slightly blue-white
+            self._star_surfs.append(ss)
+
+        # ---- Aurora overlay surface (pre-allocated, reused each frame) --
+        self._aurora_surf = pygame.Surface((w, h))
+        self._aurora_surf.set_alpha(SKYLINE_AURORA_ALPHA)
 
     def _on_clear(self) -> None:
         self.ripples.clear()
         self.sparkles.clear()
+        self._pings.clear()
+        self._bg_idx = 0
+        self._bg_t = 0.0
+        self._ghost_timer = 0.0
+        self._city_time = 0.0
+        self._sky_idx = 0
+        self._sky_t = 0.0
 
     def _spawn_sparkles(self, x: int, y: int, color: tuple[int, int, int]) -> None:
         n = _particle_count_for_intensity(self.intensity)
@@ -474,20 +861,53 @@ class MusicTheme(Theme):
             self.sparkles.append(SparkleParticle(float(x), float(y), color, vx, vy, sz))
 
     def on_keypress(self, key: int) -> None:
+        self._on_keypress_idle()
         note_idx = key_to_note_index(key)
         self._note_sounds[note_idx].play()  # overlaps on separate channels
 
         if len(self.ripples) >= self._max_ripples:
             self.ripples.pop(0)
         x, y = self._random_position()
-        base = random.choice(MUSIC_THEME_PALETTE)
+        base = random.choice(self._ripple_palette)
         color = _apply_intensity_to_rgb(base, self.intensity)
         ripple = Ripple(x, y, color)
         ripple.radius = self._initial_radius
         self.ripples.append(ripple)
         self._spawn_sparkles(x, y, _lighter_tint(color))
+        if self._active_instrument == "xylophone":
+            self._pings.append((x, y, 0.0))
+
+    def _spawn_ghost_ripple(self) -> None:
+        """Silent, low-opacity auto-ripple that appears during idle."""
+        if len(self.ripples) >= self._max_ripples:
+            self.ripples.pop(0)
+        x, y = self._random_position()
+        base = random.choice(self._ripple_palette)
+        color = _apply_intensity_to_rgb(base, self.intensity)
+        ripple = Ripple(x, y, color)
+        ripple.radius = self._initial_radius
+        ripple.alpha = IDLE_GHOST_RIPPLE_ALPHA * self._idle_factor
+        self.ripples.append(ripple)
 
     def update(self, dt: float) -> None:
+        self._advance_idle(dt)
+
+        effective_sec = self._bg_transition_sec * (
+            1.0 + (IDLE_MUSIC_SPEED_FACTOR - 1.0) * self._idle_factor
+        )
+        self._bg_t += dt / effective_sec
+        if self._bg_t >= 1.0:
+            self._bg_t -= 1.0
+            self._bg_idx = (self._bg_idx + 1) % len(_MUSIC_BG_COLORS)
+
+        if self._idle_factor > 0.0:
+            self._ghost_timer += dt
+            if self._ghost_timer >= IDLE_GHOST_RIPPLE_INTERVAL_SEC:
+                self._ghost_timer -= IDLE_GHOST_RIPPLE_INTERVAL_SEC
+                self._spawn_ghost_ripple()
+        else:
+            self._ghost_timer = 0.0
+
         alive: list[Ripple] = []
         for ripple in self.ripples:
             ripple.pop_age += dt
@@ -502,11 +922,72 @@ class MusicTheme(Theme):
             sp.age += dt
             sp.x += sp.vx * dt
             sp.y += sp.vy * dt
-            if sp.age < SPARKLE_LIFETIME_SEC:
+            if sp.age < self._sparkle_lifetime_sec:
                 spark_alive.append(sp)
         self.sparkles = spark_alive
 
+        if self._pings:
+            self._pings = [
+                (px, py, pa + dt)
+                for px, py, pa in self._pings
+                if pa + dt < XYLOPHONE_PING_DURATION
+            ]
+
+        # City skyline: advance sky color cycle, star twinkle, window flicker
+        self._sky_t += dt / self._sky_duration
+        if self._sky_t >= 1.0:
+            self._sky_t -= 1.0
+            self._sky_idx = (self._sky_idx + 1) % len(_SKYLINE_BG_COLORS)
+        self._city_time += dt
+        for win in self._windows:
+            win[2] -= dt
+            if win[2] <= 0.0:
+                win[1] = not win[1]          # toggle lit state
+                win[2] = self._city_rng.uniform(6.0, 10.0)
+
     def draw(self, screen: pygame.Surface) -> None:
+        # ---- Layer 1: color-shifting nighttime sky (single flat fill) ----
+        sc0 = _SKYLINE_BG_COLORS[self._sky_idx]
+        sc1 = _SKYLINE_BG_COLORS[(self._sky_idx + 1) % len(_SKYLINE_BG_COLORS)]
+        screen.fill(_lerp_rgb(sc0, sc1, self._sky_t))
+
+        # ---- Layer 1b: building silhouettes (transparent SRCALPHA blit) -
+        if self._city_bg_surf is not None:
+            screen.blit(self._city_bg_surf, (0, 0))
+
+        # ---- Layer 2: twinkling stars -----------------------------------
+        t = self._city_time
+        for (sx, sy, sphase), ss in zip(self._stars, self._star_surfs):
+            alpha = int(
+                SKYLINE_STAR_DIM
+                + (SKYLINE_STAR_BRIGHT - SKYLINE_STAR_DIM)
+                * (math.sin(sphase + t * SKYLINE_STAR_SPEED) * 0.5 + 0.5)
+            )
+            ss.set_alpha(alpha)
+            screen.blit(ss, (int(sx), int(sy)))
+
+        # ---- Layer 3: flickering window lights --------------------------
+        for win in self._windows:
+            if win[1]:   # lit
+                pygame.draw.rect(screen, win[3], win[0])
+
+        # ---- Layer 4: aurora color overlay at 60 % opacity --------------
+        c0 = _MUSIC_BG_COLORS[self._bg_idx]
+        c1 = _MUSIC_BG_COLORS[(self._bg_idx + 1) % len(_MUSIC_BG_COLORS)]
+        if self._aurora_surf is not None:
+            self._aurora_surf.fill(_lerp_rgb(c0, c1, self._bg_t))
+            screen.blit(self._aurora_surf, (0, 0))
+
+        # Xylophone: bright "ping" flash at ripple origin
+        for px, py, pa in self._pings:
+            frac = pa / XYLOPHONE_PING_DURATION
+            a = int(255 * (1.0 - frac))
+            pr = max(1, int(XYLOPHONE_PING_RADIUS * (0.4 + 0.6 * frac)))
+            dim = pr * 2 + 2
+            psurf = pygame.Surface((dim, dim), pygame.SRCALPHA)
+            pygame.draw.circle(psurf, (255, 255, 255, a), (pr + 1, pr + 1), pr)
+            screen.blit(psurf, (px - pr - 1, py - pr - 1))
+
         for ripple in self.ripples:
             pop = _ripple_pop_scale(ripple.pop_age)
             r = max(1, int(ripple.radius * pop))
@@ -517,17 +998,27 @@ class MusicTheme(Theme):
             diameter = r * 2
             surf = pygame.Surface((diameter, diameter), pygame.SRCALPHA)
             rw = max(1, int(self._ring_width * pop)) if pop < 1.0 else self._ring_width
-            pygame.draw.circle(
-                surf,
-                (*ripple.color, alpha),
-                (r, r),
-                r,
-                width=rw,
-            )
+            if self._draw_square_ripple:
+                # Synth: thick rounded-square outline (small corner radius = angular look)
+                pygame.draw.rect(
+                    surf,
+                    (*ripple.color, alpha),
+                    (0, 0, diameter, diameter),
+                    width=rw,
+                    border_radius=max(4, r // 5),
+                )
+            else:
+                pygame.draw.circle(
+                    surf,
+                    (*ripple.color, alpha),
+                    (r, r),
+                    r,
+                    width=rw,
+                )
             screen.blit(surf, (ripple.x - r, ripple.y - r))
 
         for sp in self.sparkles:
-            t = sp.age / SPARKLE_LIFETIME_SEC
+            t = sp.age / self._sparkle_lifetime_sec
             a = int(255 * (1.0 - t))
             if a <= 0:
                 continue
@@ -559,6 +1050,124 @@ def _star_points(cx: float, cy: float, radius: float) -> list[tuple[float, float
 # -----------------------------------------------------------------------------
 # EmojiTheme — floating emojis that fade out
 # -----------------------------------------------------------------------------
+
+BG_CONFETTI_COUNT = 35
+BG_CONFETTI_RADIUS_MIN = 4.0
+BG_CONFETTI_RADIUS_MAX = 8.0
+BG_CONFETTI_SPEED_MIN = 20.0   # px / sec downward drift
+BG_CONFETTI_SPEED_MAX = 45.0
+BG_CONFETTI_SWAY_AMP_MIN = 8.0
+BG_CONFETTI_SWAY_AMP_MAX = 24.0
+BG_CONFETTI_SWAY_FREQ_MIN = 0.15  # Hz
+BG_CONFETTI_SWAY_FREQ_MAX = 0.40
+BG_CONFETTI_ALPHA = int(round(255 * 0.45))   # 45 % opacity ≈ 115
+BG_CONFETTI_PALETTE: tuple[tuple[int, int, int], ...] = (
+    (255, 205, 210),  # #ffcdd2
+    (248, 187, 217),  # #f8bbd9
+    (225, 190, 231),  # #e1bee7
+    (187, 222, 251),  # #bbdefb
+    (178, 223, 219),  # #b2dfdb
+    (220, 237, 200),  # #dcedc8
+    (255, 249, 196),  # #fff9c4
+)
+
+# Per-category solid color-shifting background palettes for EmojiTheme.
+# Raw hex values defined here; processing applied below.
+_EMOJI_BG_RAW: dict[str, tuple[tuple[int, int, int], ...]] = {
+    "Animals": (
+        (200, 230, 201),  # #c8e6c9 — soft green
+        (220, 237, 200),  # #dcedc8 — light lime
+        (255, 249, 196),  # #fff9c4 — warm yellow
+        (255, 224, 178),  # #ffe0b2 — sandy beige
+        (215, 204, 200),  # #d7ccc8 — warm gray
+    ),
+    "Food": (
+        (255, 204, 188),  # #ffccbc — peach
+        (255, 249, 196),  # #fff9c4 — cream yellow
+        (248, 187, 217),  # #f8bbd9 — soft pink
+        (255, 224, 178),  # #ffe0b2 — warm orange
+    ),
+    "Space": (
+        ( 26,  26,  78),  # #1a1a4e — deep navy
+        ( 45,  27, 105),  # #2d1b69 — dark purple
+        ( 27,  42,  74),  # #1b2a4a — midnight blue
+        ( 13,  33,  55),  # #0d2137 — near-black blue
+        ( 26,  10,  46),  # #1a0a2e — deep indigo
+    ),
+    "Faces": (
+        (255, 249, 196),  # #fff9c4 — sunny yellow
+        (252, 228, 236),  # #fce4ec — soft pink
+        (255, 243, 224),  # #fff3e0 — warm peach
+        (243, 229, 245),  # #f3e5f5 — lavender
+        (232, 245, 233),  # #e8f5e9 — mint
+    ),
+}
+
+# Apply 60 % desaturation + 35 % brightness reduction (same recipe as MusicTheme).
+# Space is intentionally left untouched — it is already very dark and muted.
+_EMOJI_BG_PALETTES: dict[str, tuple[tuple[int, int, int], ...]] = {
+    k: tuple(_darken(_desaturate(c, 0.60), 0.35) for c in v) if k != "Space" else v
+    for k, v in _EMOJI_BG_RAW.items()
+}
+_EMOJI_BG_PALETTES["All"] = (
+    _EMOJI_BG_PALETTES["Animals"]
+    + _EMOJI_BG_PALETTES["Food"]
+    + _EMOJI_BG_PALETTES["Space"]
+    + _EMOJI_BG_PALETTES["Faces"]
+)
+
+# ---------------------------------------------------------------------------
+# Sunny meadow background constants (EmojiTheme)   — all colours 20 % dimmer
+# ---------------------------------------------------------------------------
+MEADOW_SEED         = 7
+MEADOW_HORIZON      = 0.60                       # reference fraction (clouds stay above)
+# Sun — 30 % larger than original design, 20 % dimmer colour
+MEADOW_SUN_CLR      = (204, 172,   0)            # #ffd700 × 0.80
+MEADOW_SUN_R        = 78                         # 60 × 1.30
+MEADOW_RAY_LEN      = 36                         # 28 × 1.30 — scaled proportionally
+MEADOW_RAY_W        = 4
+MEADOW_SUN_SPEED    = math.radians(10.0)         # radians per second
+# Clouds — 20 % dimmer
+MEADOW_CLOUD_CLR    = (192, 192, 192)            # #f0f0f0 × 0.80
+MEADOW_CLOUD_ALPHA  = 204                        # ≈80 % of 255
+MEADOW_CLOUD_SPEED  = 8.0                        # px/s leftward drift
+# Rolling hills — 3 layers, already 20 % dimmed from the spec colours
+MEADOW_HILL_BACK    = ( 98, 146,  58)            # #7ab648 × 0.80
+MEADOW_HILL_MID     = ( 85, 138,  49)            # #6aad3d × 0.80
+MEADOW_HILL_FRONT   = ( 72, 126,  38)            # #5a9e30 × 0.80
+# Daytime sky colour-shift palette — 20 % dimmer, subtle & desaturated
+_MEADOW_SKY_COLORS: tuple[tuple[int, int, int], ...] = (
+    (108, 165, 188),  # #87ceeb × 0.80
+    (141, 179, 204),  # #b0e0ff × 0.80
+    (161, 186, 204),  # #c9e8ff × 0.80
+    (134, 173, 187),  # #a8d8ea × 0.80
+    (108, 165, 188),  # loop back
+)
+MEADOW_SKY_DURATION = 8.0                        # seconds per colour step
+
+
+class _BgConfettiParticle:
+    __slots__ = ("base_x", "y", "radius", "color", "speed", "sway_amp", "sway_freq", "phase")
+
+    def __init__(
+        self,
+        base_x: float,
+        y: float,
+        radius: float,
+        color: tuple[int, int, int],
+        speed: float,
+        sway_amp: float,
+        sway_freq: float,
+        phase: float,
+    ) -> None:
+        self.base_x = base_x
+        self.y = y
+        self.radius = radius
+        self.color = color
+        self.speed = speed
+        self.sway_amp = sway_amp
+        self.sway_freq = sway_freq
+        self.phase = phase
 
 
 class ConfettiParticle:
@@ -603,6 +1212,7 @@ class EmojiTheme(Theme):
         self,
         screen: pygame.Surface,
         intensity: float = DEFAULT_INTENSITY,
+        active_pack: str = "All",
     ) -> None:
         super().__init__(screen, intensity)
         self.emojis: list[EmojiSprite] = []
@@ -612,10 +1222,172 @@ class EmojiTheme(Theme):
         self._max_emojis = max(1, int(MAX_EMOJIS * scale))
         self._size_min = max(16, int(EMOJI_SIZE_MIN * scale))
         self._size_max = max(self._size_min, int(EMOJI_SIZE_MAX * scale))
+        self.active_pack: str = active_pack
+        # Solid color-shifting background (same mechanic as MusicTheme)
+        self._bg_pal_colors = _EMOJI_BG_PALETTES.get(active_pack, _EMOJI_BG_PALETTES["All"])
+        self._bg_pal_idx: int = 0
+        self._bg_pal_t: float = 0.0
+        self._bg_pal_duration: float = _music_bg_transition_duration(intensity)
+        # Background confetti particles
+        self._bg_time = 0.0
+        self._bg_particles: list[_BgConfettiParticle] = []
+        _it = max(0.0, min(1.0, intensity))
+        self._bg_count    = max(1, round(15 + 40 * _it))              # 15 → 35 → 55
+        self._bg_speed_min = 15.0 + 25.0 * _it                        # 15 → 27.5 → 40
+        self._bg_speed_max = 25.0 + 40.0 * _it                        # 25 → 45 → 65
+        self._bg_radius_min = 4.0 + 2.0 * _it                         # 4 → 5 → 6
+        self._bg_radius_max = 8.0 + 4.0 * _it                         # 8 → 10 → 12
+        self._dim_overlay = pygame.Surface((self._screen_w, self._screen_h))
+        self._dim_overlay.fill((0, 0, 0))
+        self._init_bg_confetti(spread=True)
+        # Sunny meadow background (built once at init)
+        self._meadow_ground_surf: pygame.Surface | None = None
+        self._meadow_time:    float = 0.0
+        self._sun_angle:      float = 0.0
+        self._sun_pos:        tuple[int, int] = (0, 0)
+        self._meadow_sky_idx: int   = 0
+        self._meadow_sky_t:   float = 0.0
+        # Each cloud: [x, y, surf, blit_ox, blit_oy]
+        self._clouds: list[list] = []
+        self._build_meadow()
+
+    def _init_bg_confetti(self, spread: bool = False) -> None:
+        """Populate the background particle pool.  spread=True scatters
+        particles across the full screen height so there is no empty-screen
+        flash when the theme first loads."""
+        self._bg_particles.clear()
+        for _ in range(self._bg_count):
+            y = (
+                random.uniform(0.0, self._screen_h)
+                if spread
+                else -random.uniform(0.0, self._screen_h * 0.5)
+            )
+            self._bg_particles.append(self._make_bg_particle(
+                x=random.uniform(0.0, float(self._screen_w)),
+                y=y,
+            ))
+
+    def _make_bg_particle(self, x: float, y: float) -> _BgConfettiParticle:
+        return _BgConfettiParticle(
+            base_x=x,
+            y=y,
+            radius=random.uniform(self._bg_radius_min, self._bg_radius_max),
+            color=random.choice(BG_CONFETTI_PALETTE),
+            speed=random.uniform(self._bg_speed_min, self._bg_speed_max),
+            sway_amp=random.uniform(BG_CONFETTI_SWAY_AMP_MIN, BG_CONFETTI_SWAY_AMP_MAX),
+            sway_freq=random.uniform(BG_CONFETTI_SWAY_FREQ_MIN, BG_CONFETTI_SWAY_FREQ_MAX),
+            phase=random.uniform(0.0, 2.0 * math.pi),
+        )
+
+    # ------------------------------------------------------------------
+    # Meadow helpers
+    # ------------------------------------------------------------------
+
+    def _build_meadow(self) -> None:
+        """Pre-bake rolling hills surface and generate clouds + sun position."""
+        w, h = self._screen_w, self._screen_h
+        rng = random.Random(MEADOW_SEED)
+
+        # ---- Rolling hills (SRCALPHA — dynamic sky shows through above) -
+        self._meadow_ground_surf = pygame.Surface((w, h), pygame.SRCALPHA)
+        hill_specs = [
+            # (color,           crest_frac, amplitude, freq,  phase)
+            (MEADOW_HILL_BACK,  0.48,       55.0,      1.25,  0.0),
+            (MEADOW_HILL_MID,   0.56,       42.0,      1.70,  0.9),
+            (MEADOW_HILL_FRONT, 0.63,       32.0,      1.05,  1.7),
+        ]
+        n_pts = max(24, w // 3)
+        for color, crest_frac, amp, freq, phase in hill_specs:
+            crest_y = int(h * crest_frac)
+            pts = []
+            for i in range(n_pts + 1):
+                x = int(i * w / n_pts)
+                y = crest_y + int(amp * math.sin(freq * 2.0 * math.pi * i / n_pts + phase))
+                pts.append((x, y))
+            pts.append((w, h))
+            pts.append((0, h))
+            pygame.draw.polygon(self._meadow_ground_surf, color, pts)
+
+        # ---- Sun position (upper-right quadrant) ------------------------
+        self._sun_pos = (int(w * 0.82), int(h * 0.14))
+
+        # ---- 8 clouds evenly spread across the sky, varied sizes --------
+        self._clouds = []
+        n_clouds = 8
+        size_profiles = [40, 32, 50, 36, 46, 28, 44, 38]   # max_r per cloud
+        for i in range(n_clouds):
+            # Evenly space anchor within each screen slice, with small jitter
+            slot_w = float(w) / n_clouds
+            cx = rng.uniform(i * slot_w, (i + 1) * slot_w)
+            cy = rng.uniform(h * 0.05, h * 0.38)
+            max_r = size_profiles[i % len(size_profiles)] + rng.randint(-4, 4)
+            n_circ = rng.randint(4, 7)
+            circles: list[tuple[int, int, int]] = []
+            x_off = 0
+            for _ in range(n_circ):
+                r = rng.randint(max(8, max_r - 12), max_r)
+                circles.append((x_off + rng.randint(-8, 8), rng.randint(-10, 6), r))
+                x_off += rng.randint(22, 38)
+            xs_lo = [rx - r for rx, ry, r in circles]
+            xs_hi = [rx + r for rx, ry, r in circles]
+            ys_lo = [ry - r for rx, ry, r in circles]
+            ys_hi = [ry + r for rx, ry, r in circles]
+            min_x, max_x = min(xs_lo), max(xs_hi)
+            min_y, max_y = min(ys_lo), max(ys_hi)
+            sw = max(1, max_x - min_x + 4)
+            sh = max(1, max_y - min_y + 4)
+            csurf = pygame.Surface((sw, sh), pygame.SRCALPHA)
+            for rx, ry, r in circles:
+                pygame.draw.circle(
+                    csurf,
+                    (*MEADOW_CLOUD_CLR, MEADOW_CLOUD_ALPHA),
+                    (rx - min_x + 2, ry - min_y + 2), r,
+                )
+            # cloud entry: [x, y, surf, blit_ox, blit_oy]
+            self._clouds.append([cx, cy, csurf, min_x - 2, min_y - 2])
+
+    def _draw_meadow(self, screen: pygame.Surface) -> None:
+        """Draw the sunny meadow: colour-shifting sky, rolling hills, sun, clouds."""
+        # 1. Sky — dynamic flat colour fill (crossfades through daytime palette)
+        c0 = _MEADOW_SKY_COLORS[self._meadow_sky_idx]
+        c1 = _MEADOW_SKY_COLORS[(self._meadow_sky_idx + 1) % len(_MEADOW_SKY_COLORS)]
+        screen.fill(_lerp_rgb(c0, c1, self._meadow_sky_t))
+
+        # 2. Sun + rotating rays (drawn before clouds so clouds can overlap)
+        sx, sy = self._sun_pos
+        pygame.draw.circle(screen, MEADOW_SUN_CLR, (sx, sy), MEADOW_SUN_R)
+        for i in range(8):
+            ang = self._sun_angle + (math.pi / 4) * i
+            cos_a, sin_a = math.cos(ang), math.sin(ang)
+            x1 = int(sx + cos_a * (MEADOW_SUN_R + 6))
+            y1 = int(sy + sin_a * (MEADOW_SUN_R + 6))
+            x2 = int(sx + cos_a * (MEADOW_SUN_R + MEADOW_RAY_LEN))
+            y2 = int(sy + sin_a * (MEADOW_SUN_R + MEADOW_RAY_LEN))
+            pygame.draw.line(screen, MEADOW_SUN_CLR, (x1, y1), (x2, y2), MEADOW_RAY_W)
+            pygame.draw.circle(screen, MEADOW_SUN_CLR, (x2, y2), MEADOW_RAY_W // 2)
+
+        # 3. Clouds (pre-rendered SRCALPHA surfs, drifting left)
+        for cloud in self._clouds:
+            screen.blit(
+                cloud[2],
+                (int(cloud[0]) + cloud[3], int(cloud[1]) + cloud[4]),
+            )
+
+        # 4. Rolling hills (SRCALPHA blit — transparent sky area shows fill above)
+        if self._meadow_ground_surf is not None:
+            screen.blit(self._meadow_ground_surf, (0, 0))
 
     def _on_clear(self) -> None:
         self.emojis.clear()
         self.confetti.clear()
+        self._bg_time = 0.0
+        self._bg_pal_idx = 0
+        self._bg_pal_t = 0.0
+        self._meadow_time = 0.0
+        self._sun_angle = 0.0
+        self._meadow_sky_idx = 0
+        self._meadow_sky_t = 0.0
+        self._init_bg_confetti(spread=True)
 
     def _font_for_size(self, size: int) -> pygame.font.Font:
         if size not in self._font_cache:
@@ -640,6 +1412,7 @@ class EmojiTheme(Theme):
             )
 
     def on_keypress(self, key: int) -> None:
+        self._on_keypress_idle()
         del key
         play_pop_sound()
 
@@ -647,10 +1420,35 @@ class EmojiTheme(Theme):
             self.emojis.pop(0)
         x, y = self._random_position(margin=60)
         size = random.randint(self._size_min, self._size_max)
-        self.emojis.append(EmojiSprite(x, y, random.choice(EMOJI_CHARS), size))
+        self.emojis.append(EmojiSprite(x, y, random.choice(EMOJI_PACKS[self.active_pack]), size))
         self._spawn_confetti(x, y)
 
     def update(self, dt: float) -> None:
+        self._advance_idle(dt)
+        self._bg_time += dt
+
+        # Meadow animation: sky colour cycle, sun rotation, cloud drift
+        self._meadow_time += dt
+        self._sun_angle += MEADOW_SUN_SPEED * dt
+        self._meadow_sky_t += dt / MEADOW_SKY_DURATION
+        if self._meadow_sky_t >= 1.0:
+            self._meadow_sky_t -= 1.0
+            self._meadow_sky_idx = (self._meadow_sky_idx + 1) % len(_MEADOW_SKY_COLORS)
+        for cloud in self._clouds:
+            cloud[0] -= MEADOW_CLOUD_SPEED * dt
+            # Wrap when the cloud surface has fully exited the left edge
+            surf_w = cloud[2].get_width()
+            if int(cloud[0]) + cloud[3] + surf_w < 0:
+                cloud[0] = float(self._screen_w - cloud[3])
+
+        drift_mult = 1.0 - (1.0 - IDLE_EMOJI_DRIFT_FACTOR) * self._idle_factor
+        for p in self._bg_particles:
+            p.y += p.speed * drift_mult * dt
+            if p.y > self._screen_h + p.radius:
+                p.base_x = random.uniform(0.0, float(self._screen_w))
+                p.y = -p.radius
+                p.phase = random.uniform(0.0, 2.0 * math.pi)
+
         alive: list[EmojiSprite] = []
         for emoji in self.emojis:
             emoji.age += dt
@@ -670,6 +1468,25 @@ class EmojiTheme(Theme):
         self.confetti = conf_alive
 
     def draw(self, screen: pygame.Surface) -> None:
+        # Meadow background (drawn first, everything on top)
+        self._draw_meadow(screen)
+
+        for p in self._bg_particles:
+            draw_x = p.base_x + p.sway_amp * math.sin(
+                2.0 * math.pi * p.sway_freq * self._bg_time + p.phase
+            )
+            rad = max(1, int(p.radius))
+            dim = rad * 2 + 2
+            surf = pygame.Surface((dim, dim), pygame.SRCALPHA)
+            pygame.draw.circle(surf, (*p.color, BG_CONFETTI_ALPHA), (rad + 1, rad + 1), rad)
+            screen.blit(surf, (int(draw_x) - rad - 1, int(p.y) - rad - 1))
+
+        if self._idle_factor > 0.0:
+            self._dim_overlay.set_alpha(
+                int(round(255 * IDLE_EMOJI_DIM_AMOUNT * self._idle_factor))
+            )
+            screen.blit(self._dim_overlay, (0, 0))
+
         for emoji in self.emojis:
             t = emoji.age / EMOJI_LIFETIME
             alpha = int(255 * (1.0 - t))
@@ -723,7 +1540,8 @@ def switch_theme(
         current.clear()
     if factory is MusicTheme:
         return MusicTheme(screen, NOTE_SOUNDS, intensity)
-    return EmojiTheme(screen, intensity)
+    pack = current.active_pack if isinstance(current, EmojiTheme) else "All"
+    return EmojiTheme(screen, intensity, pack)
 
 
 def draw_theme_label(
@@ -733,6 +1551,46 @@ def draw_theme_label(
 ) -> None:
     text = hud_font.render(label, True, (180, 180, 180))
     screen.blit(text, (16, 12))
+
+
+def draw_mode_pill(
+    screen: pygame.Surface,
+    theme: "Theme",
+    font: pygame.font.Font,
+) -> None:
+    """Top-left corner indicator: current theme and sub-selection."""
+    if isinstance(theme, MusicTheme):
+        _instr_display = {
+            "piano":     "Piano",
+            "xylophone": "Xylophone",
+            "synth":     "Synth",
+            "harp":      "Harp",
+        }
+        label = "\u2669 " + _instr_display.get(theme.active_instrument, theme.active_instrument.title())
+    elif isinstance(theme, EmojiTheme):
+        _cat_display = {
+            "All":     "All Emojis",
+            "Animals": "Animals",
+            "Food":    "Food",
+            "Space":   "Space",
+            "Faces":   "Faces",
+        }
+        label = _cat_display.get(theme.active_pack, theme.active_pack)
+    else:
+        return
+
+    text_surf = font.render(label, True, (255, 255, 255))
+    pad_x, pad_y = 11, 6
+    # Use glyph height (ascent+|descent|) so pill height is tight to the text
+    glyph_h = font.get_ascent() + abs(font.get_descent())
+    pill_w   = text_surf.get_width() + pad_x * 2
+    pill_h   = glyph_h + pad_y * 2
+    pill     = pygame.Surface((pill_w, pill_h), pygame.SRCALPHA)
+    _aa_rounded_rect(pill, (26, 26, 46, 179), pill.get_rect(), pill_h // 2)
+    # Vertical: centre glyph, not the larger line-spacing surface
+    ty = (pill_h - text_surf.get_height()) // 2
+    pill.blit(text_surf, (pad_x, ty))
+    screen.blit(pill, (16, 16))
 
 
 # -----------------------------------------------------------------------------
@@ -1523,6 +2381,8 @@ class AppSettings(NamedTuple):
     volume: float
     intensity: float
     suppress_notifications: bool
+    emoji_category: str
+    music_instrument: str
 
 
 def default_settings() -> AppSettings:
@@ -1530,6 +2390,8 @@ def default_settings() -> AppSettings:
         DEFAULT_VOLUME,
         DEFAULT_INTENSITY,
         DEFAULT_SUPPRESS_NOTIFICATIONS,
+        "All",
+        "piano",
     )
 
 
@@ -1555,6 +2417,8 @@ def save_settings(settings: AppSettings) -> None:
             "volume": settings.volume,
             "intensity": settings.intensity,
             "suppress_notifications": settings.suppress_notifications,
+            "emoji_category": settings.emoji_category,
+            "music_instrument": settings.music_instrument,
         }
         with SETTINGS_PATH.open("w", encoding="utf-8") as file:
             json.dump(payload, file, indent=2)
@@ -1571,6 +2435,10 @@ def load_settings() -> AppSettings:
             with SETTINGS_PATH.open(encoding="utf-8") as file:
                 data = json.load(file)
             if isinstance(data, dict):
+                raw_cat = str(data.get("emoji_category", "All"))
+                emoji_cat = raw_cat if raw_cat in EMOJI_PACKS else "All"
+                raw_instr = str(data.get("music_instrument", "piano"))
+                music_instr = raw_instr if raw_instr in _INSTRUMENT_KEY.values() else "piano"
                 settings = AppSettings(
                     _clamp_unit_float(data.get("volume"), defaults.volume),
                     _clamp_unit_float(data.get("intensity"), defaults.intensity),
@@ -1578,6 +2446,8 @@ def load_settings() -> AppSettings:
                         data.get("suppress_notifications"),
                         defaults.suppress_notifications,
                     ),
+                    emoji_cat,
+                    music_instr,
                 )
                 save_settings(settings)
                 return settings
@@ -1588,6 +2458,338 @@ def load_settings() -> AppSettings:
 
 
 # -----------------------------------------------------------------------------
+# Stress test (developer / parent tool — F7 from SETUP)
+# -----------------------------------------------------------------------------
+
+
+class StressTestResult(NamedTuple):
+    flash_rate_hz: float
+    avg_fps: float
+    min_fps: float
+    max_fps: float
+    peak_brightness_delta: float
+    red_spike_count: int
+    passed: bool
+    timestamp: str
+    theme_label: str
+
+
+class FlashRateTracker:
+    """
+    WCAG 2.3.1 general-flash detector.
+    A flash = a pair of opposing relative-luminance changes >= threshold.
+    Reports the maximum number of such events in any 1-second window.
+    """
+
+    def __init__(self, threshold: float = STRESS_BRIGHTNESS_THRESHOLD) -> None:
+        self._threshold = threshold
+        self._last_significant: float | None = None
+        self._last_direction: int = 0   # +1 rising, -1 falling, 0 unknown
+        self._flash_times: list[float] = []
+
+    def update(self, luma: float, t: float) -> None:
+        if self._last_significant is None:
+            self._last_significant = luma
+            return
+        delta = luma - self._last_significant
+        if abs(delta) >= self._threshold:
+            direction = 1 if delta > 0 else -1
+            if self._last_direction != 0 and direction != self._last_direction:
+                self._flash_times.append(t)
+            self._last_direction = direction
+            self._last_significant = luma
+
+    def peak_hz(self) -> float:
+        """Maximum flash count in any 1-second window."""
+        if len(self._flash_times) < 2:
+            return 0.0
+        best = 0
+        for i, t0 in enumerate(self._flash_times):
+            count = sum(1 for ts in self._flash_times[i:] if ts < t0 + 1.0)
+            best = max(best, count)
+        return float(best)
+
+
+def _measure_screen(screen: pygame.Surface) -> tuple[float, bool]:
+    """
+    Downsample surface to STRESS_SAMPLE_SIZE, return (avg_luma_0_1, red_spike).
+    Red spike: avg R > STRESS_RED_R_MIN and dominates G and B by STRESS_RED_RATIO.
+    """
+    small = pygame.transform.scale(screen, STRESS_SAMPLE_SIZE)
+    arr = pygame.surfarray.array3d(small).astype(np.float32)
+    avg_r = float(arr[:, :, 0].mean())
+    avg_g = float(arr[:, :, 1].mean())
+    avg_b = float(arr[:, :, 2].mean())
+    luma = (avg_r * 0.299 + avg_g * 0.587 + avg_b * 0.114) / 255.0
+    red_spike = (
+        avg_r > STRESS_RED_R_MIN
+        and avg_g > 0
+        and avg_b > 0
+        and avg_r > avg_g * STRESS_RED_RATIO
+        and avg_r > avg_b * STRESS_RED_RATIO
+    )
+    return luma, red_spike
+
+
+def _make_stress_theme(factory: type[Theme], screen: pygame.Surface) -> Theme:
+    """Construct a max-intensity theme for stress testing."""
+    if factory is MusicTheme:
+        return MusicTheme(screen, NOTE_SOUNDS, 1.0)
+    return factory(screen, 1.0)
+
+
+class StressTestRunner:
+    """
+    Drives the 15-second developer stress test: synthetic keypresses at maximum
+    rate, rapid theme cycling, intensity = 1.0.  Records brightness / FPS /
+    flash / red-spike data each frame.  Audio is silenced for the duration.
+
+    Pass theme_factory to test a single theme; pass None to cycle both.
+    """
+
+    _ALL_KEYS: tuple[int, ...] = tuple(range(pygame.K_a, pygame.K_z + 1)) + (
+        pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5,
+    )
+
+    def __init__(
+        self,
+        screen: pygame.Surface,
+        theme_factory: type[Theme] | None = None,
+    ) -> None:
+        self._saved_volume = CURRENT_PLAY_VOLUME
+        apply_session_volume(0.0)
+        self._elapsed = 0.0
+        self._key_timer = 0.0
+        self._theme_timer = 0.0
+        self._theme_idx = 0
+        if theme_factory is not None:
+            self._themes: list[Theme] = [_make_stress_theme(theme_factory, screen)]
+            self._theme_label = theme_factory.name if hasattr(theme_factory, "name") else "Custom"
+        else:
+            self._themes = [
+                MusicTheme(screen, NOTE_SOUNDS, 1.0),
+                EmojiTheme(screen, 1.0),
+            ]
+            self._theme_label = "Music + Emoji"
+        self._flash = FlashRateTracker()
+        self._fps_samples: list[float] = []
+        self._peak_delta = 0.0
+        self._red_spikes = 0
+        self._last_luma: float | None = None
+
+    @property
+    def elapsed(self) -> float:
+        return self._elapsed
+
+    @property
+    def done(self) -> bool:
+        return self._elapsed >= STRESS_TEST_DURATION_SEC
+
+    @property
+    def progress(self) -> float:
+        return min(1.0, self._elapsed / STRESS_TEST_DURATION_SEC)
+
+    def _current_theme(self) -> Theme:
+        return self._themes[self._theme_idx]
+
+    def update(self, dt: float) -> None:
+        self._elapsed = min(self._elapsed + dt, STRESS_TEST_DURATION_SEC)
+
+        self._key_timer += dt
+        while self._key_timer >= STRESS_TEST_KEY_INTERVAL_SEC:
+            self._key_timer -= STRESS_TEST_KEY_INTERVAL_SEC
+            self._current_theme().on_keypress(random.choice(self._ALL_KEYS))
+
+        self._theme_timer += dt
+        if self._theme_timer >= STRESS_TEST_THEME_INTERVAL_SEC:
+            self._theme_timer -= STRESS_TEST_THEME_INTERVAL_SEC
+            self._theme_idx = (self._theme_idx + 1) % len(self._themes)
+
+        self._current_theme().update(dt)
+
+        if dt > 0:
+            self._fps_samples.append(min(1.0 / dt, 9999.0))
+
+    def draw(self, screen: pygame.Surface) -> None:
+        screen.fill(BACKGROUND_COLOR)
+        self._current_theme().draw(screen)
+
+    def measure(self, screen: pygame.Surface) -> None:
+        """Capture per-frame brightness metrics; call after draw(), before flip()."""
+        luma, red_spike = _measure_screen(screen)
+        self._flash.update(luma, self._elapsed)
+        if self._last_luma is not None:
+            delta = abs(luma - self._last_luma)
+            self._peak_delta = max(self._peak_delta, delta)
+        self._last_luma = luma
+        if red_spike:
+            self._red_spikes += 1
+
+    def finish(self) -> StressTestResult:
+        apply_session_volume(self._saved_volume)
+        samples = self._fps_samples or [0.0]
+        flash_hz = self._flash.peak_hz()
+        return StressTestResult(
+            flash_rate_hz=flash_hz,
+            avg_fps=sum(samples) / len(samples),
+            min_fps=min(samples),
+            max_fps=max(samples),
+            peak_brightness_delta=self._peak_delta,
+            red_spike_count=self._red_spikes,
+            passed=flash_hz <= STRESS_TEST_FLASH_LIMIT_HZ,
+            timestamp=time.strftime("%Y-%m-%dT%H-%M-%S"),
+            theme_label=self._theme_label,
+        )
+
+
+def _stress_log_path() -> Path:
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+    return base / _LOG_APP_DIR / _LOG_SUBDIR
+
+
+def write_stress_log(result: StressTestResult) -> Path | None:
+    """Write results to %LOCALAPPDATA%\\KeyboardMasher\\logs\\stress_<ts>.log."""
+    try:
+        log_dir = _stress_log_path()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"stress_{result.timestamp}.log"
+        flash_pass = result.flash_rate_hz <= STRESS_TEST_FLASH_LIMIT_HZ
+        lines = [
+            f"KeyboardMasher Stress Test  {result.timestamp}",
+            f"Theme: {result.theme_label}",
+            "=" * 52,
+            f"Overall result: {'PASS' if result.passed else 'FAIL'}",
+            "",
+            (
+                f"  Flash rate        {result.flash_rate_hz:.2f} Hz"
+                f"  (limit {STRESS_TEST_FLASH_LIMIT_HZ:.1f} Hz)"
+                f"  {'PASS' if flash_pass else 'FAIL'}"
+            ),
+            f"  Avg FPS           {result.avg_fps:.1f}",
+            f"  Min FPS           {result.min_fps:.1f}",
+            f"  Max FPS           {result.max_fps:.1f}",
+            f"  Peak brightness \u0394 {result.peak_brightness_delta:.4f}",
+            f"  Red spike frames  {result.red_spike_count}",
+            "",
+            "Safe to ship." if result.passed else "Review flagged items before shipping.",
+        ]
+        log_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return log_file
+    except OSError:
+        return None
+
+
+def draw_stress_test_hud(
+    screen: pygame.Surface,
+    runner: StressTestRunner,
+    font: pygame.font.Font,
+) -> None:
+    """Progress bar + countdown label rendered over the stress-test visuals."""
+    w, h = screen.get_size()
+    bar_h = 8
+    pygame.draw.rect(screen, (40, 40, 40), (0, h - bar_h, w, bar_h))
+    fill_w = int(w * runner.progress)
+    pygame.draw.rect(screen, SETUP_ACCENT, (0, h - bar_h, fill_w, bar_h))
+    remaining = max(0.0, STRESS_TEST_DURATION_SEC - runner.elapsed)
+    label = font.render(
+        f"Stress Test  \u2014  {remaining:.1f}s remaining", True, (220, 220, 220)
+    )
+    screen.blit(label, (12, h - bar_h - label.get_height() - 8))
+
+
+def draw_stress_results(
+    screen: pygame.Surface,
+    result: StressTestResult,
+    big_font: pygame.font.Font,
+    med_font: pygame.font.Font,
+    sm_font: pygame.font.Font,
+) -> None:
+    """Full-screen overlay showing the stress test report."""
+    w, h = screen.get_size()
+
+    dim = pygame.Surface((w, h), pygame.SRCALPHA)
+    dim.fill((12, 12, 20, 220))
+    screen.blit(dim, (0, 0))
+
+    panel_w = min(660, w - 80)
+    panel_h = 460
+    panel_rect = pygame.Rect(0, 0, panel_w, panel_h)
+    panel_rect.center = (w // 2, h // 2)
+    panel_surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+    pygame.draw.rect(
+        panel_surf, (28, 28, 42, 245), panel_surf.get_rect(), border_radius=20
+    )
+    pygame.draw.rect(
+        panel_surf,
+        (80, 80, 120, 180),
+        panel_surf.get_rect(),
+        width=2,
+        border_radius=20,
+    )
+    screen.blit(panel_surf, panel_rect.topleft)
+
+    cx = panel_rect.centerx
+    y = panel_rect.top + 28
+
+    hdr_surf = med_font.render("STRESS TEST RESULTS", True, (180, 180, 220))
+    screen.blit(hdr_surf, hdr_surf.get_rect(centerx=cx, top=y))
+    y += hdr_surf.get_height() + 4
+
+    theme_surf = sm_font.render(f"Theme: {result.theme_label}", True, (140, 140, 170))
+    screen.blit(theme_surf, theme_surf.get_rect(centerx=cx, top=y))
+    y += theme_surf.get_height() + 8
+
+    verdict_text = "PASS" if result.passed else "FAIL"
+    verdict_color = (80, 220, 100) if result.passed else (230, 60, 60)
+    verdict_surf = big_font.render(verdict_text, True, verdict_color)
+    screen.blit(verdict_surf, verdict_surf.get_rect(centerx=cx, top=y))
+    y += verdict_surf.get_height() + 14
+
+    flash_pass = result.flash_rate_hz <= STRESS_TEST_FLASH_LIMIT_HZ
+    detail_rows: list[tuple[str, tuple[int, int, int]]] = [
+        (
+            (
+                f"Flash rate:  {result.flash_rate_hz:.2f} Hz"
+                f"  (limit: {STRESS_TEST_FLASH_LIMIT_HZ:.1f} Hz)"
+                f"  \u2014  {'PASS' if flash_pass else 'FAIL'}"
+            ),
+            (80, 220, 100) if flash_pass else (230, 60, 60),
+        ),
+        (
+            f"Avg FPS: {result.avg_fps:.1f}   Min FPS: {result.min_fps:.1f}",
+            (200, 200, 200),
+        ),
+        (
+            f"Peak brightness \u0394: {result.peak_brightness_delta:.3f}",
+            (200, 200, 200),
+        ),
+        (
+            f"Red spike frames: {result.red_spike_count}",
+            (230, 130, 60) if result.red_spike_count > 0 else (200, 200, 200),
+        ),
+    ]
+    for text, color in detail_rows:
+        s = med_font.render(text, True, color)
+        screen.blit(s, s.get_rect(centerx=cx, top=y))
+        y += s.get_height() + 10
+
+    y += 8
+    note_text = (
+        "Safe to ship."
+        if result.passed
+        else "Review flagged items before shipping."
+    )
+    note_color = (80, 210, 100) if result.passed else (240, 180, 60)
+    note_surf = med_font.render(note_text, True, note_color)
+    screen.blit(note_surf, note_surf.get_rect(centerx=cx, top=y))
+    y += note_surf.get_height() + 14
+
+    hint = sm_font.render("Press any key to return to setup.", True, (110, 110, 135))
+    screen.blit(hint, hint.get_rect(centerx=cx, top=y))
+
+
+# -----------------------------------------------------------------------------
 # App state
 # -----------------------------------------------------------------------------
 
@@ -1595,10 +2797,12 @@ def load_settings() -> AppSettings:
 class AppState(Enum):
     SETUP = auto()
     PLAYING = auto()
+    STRESS_TEST = auto()
+    STRESS_RESULTS = auto()
 
 
 class _ThemeTile:
-    __slots__ = ("emoji", "label", "subtitle", "factory")
+    __slots__ = ("emoji", "label", "subtitle", "factory", "emoji_color")
 
     def __init__(
         self,
@@ -1606,15 +2810,17 @@ class _ThemeTile:
         label: str,
         subtitle: str,
         factory: type[Theme],
+        emoji_color: tuple[int, int, int] = (255, 255, 255),
     ) -> None:
         self.emoji = emoji
         self.label = label
         self.subtitle = subtitle
         self.factory = factory
+        self.emoji_color = emoji_color
 
 
 _THEME_TILES: tuple[_ThemeTile, ...] = (
-    _ThemeTile("🎵", "Music", "Piano notes", MusicTheme),
+    _ThemeTile("🎵", "Music", "Notes", MusicTheme, (204, 204, 204)),  # #cccccc
     _ThemeTile("🎊", "Emoji", "Fun emojis", EmojiTheme),
 )
 
@@ -1624,6 +2830,8 @@ class SessionConfig(NamedTuple):
     volume: float
     intensity: float
     suppress_notifications: bool
+    emoji_category: str
+    music_instrument: str
 
 
 def _lerp_rgb(
@@ -1635,6 +2843,38 @@ def _lerp_rgb(
         int(round(float(a[1]) + (float(b[1]) - float(a[1])) * t)),
         int(round(float(a[2]) + (float(b[2]) - float(a[2])) * t)),
     )
+
+
+def _aa_rounded_rect(
+    surf: pygame.Surface,
+    color: tuple,
+    rect,
+    radius: int,
+) -> None:
+    """Anti-aliased filled rounded rectangle via 4× supersampling + smoothscale."""
+    if isinstance(rect, pygame.Rect):
+        x, y, w, h = rect.x, rect.y, rect.w, rect.h
+    else:
+        x, y, w, h = int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])
+    if w <= 0 or h <= 0:
+        return
+    scale = 4
+    big = pygame.Surface((w * scale, h * scale), pygame.SRCALPHA)
+    pygame.draw.rect(big, color, big.get_rect(), border_radius=radius * scale)
+    small = pygame.transform.smoothscale(big, (w, h))
+    surf.blit(small, (x, y))
+
+
+# Setup screen animated background — dark navy with visible blue tones
+_SETUP_BG_COLORS: tuple[tuple[int, int, int], ...] = (
+    (26,  26,  46),  # #1a1a2e
+    (22,  33,  62),  # #16213e
+    (31,  43,  94),  # #1f2b5e
+    (45,  45,  94),  # #2d2d5e
+    (26,  26,  62),  # #1a1a3e
+    (26,  26,  46),  # loop back
+)
+_SETUP_BG_DURATION = 8.0   # seconds per colour step
 
 
 class SetupNotificationToggle:
@@ -1815,11 +3055,18 @@ class SetupScreen:
         self._button_font = pygame.font.SysFont(UI_FONT_NAME, 32, bold=True)
         self._slider_label_font = pygame.font.SysFont(UI_FONT_NAME, 18)
         self._slider_value_font = pygame.font.SysFont(UI_FONT_NAME, 16)
+        self._cat_font = pygame.font.SysFont(UI_FONT_NAME, 14, bold=True)
 
         self._selected_index: int | None = None
         self._hovered_index: int | None = None
         self._dragging_slider: SetupSlider | None = None
         self._tile_rects: list[pygame.Rect] = []
+        self._cat_pill_rects: list[pygame.Rect] = []
+        self._cat_alpha_factor: float = 0.0
+        self._cat_target_alpha: float = 0.0
+        self._instr_pill_rects: list[pygame.Rect] = []
+        self._instr_alpha_factor: float = 0.0
+        self._instr_target_alpha: float = 0.0
         self._title_rect = pygame.Rect(0, 0, 0, 0)
         self._tagline_rect = pygame.Rect(0, 0, 0, 0)
         self._button_rect = pygame.Rect(0, 0, 0, 0)
@@ -1828,8 +3075,14 @@ class SetupScreen:
         self._close_hover = False
         self._button_hover = False
         self._bg_time = 0.0
+        self._setup_bg_idx: int   = 0
+        self._setup_bg_t:   float = 0.0
+        self._tile_surf_normal: pygame.Surface | None = None
+        self._tile_surf_active: pygame.Surface | None = None
         self._sliders: list[SetupSlider] = []
         self._settings = load_settings()
+        self._selected_category: str = self._settings.emoji_category
+        self._selected_instrument: str = self._settings.music_instrument
         self._layout()
         apply_session_volume(self.volume)
 
@@ -1850,31 +3103,51 @@ class SetupScreen:
     def suppress_notifications(self) -> bool:
         return self._notification_toggle.enabled
 
+    @property
+    def selected_theme_factory(self) -> type[Theme] | None:
+        """Return the currently highlighted theme factory, or None if none selected."""
+        if self._selected_index is not None:
+            return _THEME_TILES[self._selected_index].factory
+        return None
+
     def _persist_settings(self) -> None:
         save_settings(
-            AppSettings(self.volume, self.intensity, self.suppress_notifications)
+            AppSettings(
+                self.volume, self.intensity,
+                self.suppress_notifications, self._selected_category,
+                self._selected_instrument,
+            )
         )
 
     def tick(self, dt: float) -> None:
-        """Advance setup-only animation (background gradient)."""
+        """Advance setup-only animations (background, pill fade)."""
         self._bg_time += dt
+        self._setup_bg_t += dt / _SETUP_BG_DURATION
+        if self._setup_bg_t >= 1.0:
+            self._setup_bg_t -= 1.0
+            self._setup_bg_idx = (self._setup_bg_idx + 1) % len(_SETUP_BG_COLORS)
+        rate = 1.0 / SETUP_CAT_FADE_SEC
+        if self._cat_target_alpha > self._cat_alpha_factor:
+            self._cat_alpha_factor = min(
+                self._cat_target_alpha, self._cat_alpha_factor + rate * dt
+            )
+        else:
+            self._cat_alpha_factor = max(
+                self._cat_target_alpha, self._cat_alpha_factor - rate * dt
+            )
+        if self._instr_target_alpha > self._instr_alpha_factor:
+            self._instr_alpha_factor = min(
+                self._instr_target_alpha, self._instr_alpha_factor + rate * dt
+            )
+        else:
+            self._instr_alpha_factor = max(
+                self._instr_target_alpha, self._instr_alpha_factor - rate * dt
+            )
 
     def _draw_animated_background(self, screen: pygame.Surface) -> None:
-        w, h = screen.get_size()
-        phase = (math.sin(self._bg_time * (2.0 * math.pi / SETUP_BG_CYCLE_SEC)) + 1.0) * 0.5
-        pal = MUSIC_THEME_PALETTE
-        # Morph gradient endpoints through palette pairs; blend toward base so UI stays legible.
-        c_top = _lerp_rgb(_lerp_rgb(pal[0], pal[5], phase), SETUP_BACKGROUND_COLOR, 0.32)
-        c_bot = _lerp_rgb(_lerp_rgb(pal[3], pal[7], phase), SETUP_BACKGROUND_COLOR, 0.32)
-        bands = SETUP_GRADIENT_BANDS
-        for i in range(bands):
-            y0 = (i * h) // bands
-            y1 = ((i + 1) * h) // bands
-            if y1 <= y0:
-                y1 = y0 + 1
-            t = (i + 0.5) / float(bands)
-            c = _lerp_rgb(c_top, c_bot, t)
-            pygame.draw.rect(screen, c, (0, y0, w, y1 - y0))
+        c0 = _SETUP_BG_COLORS[self._setup_bg_idx]
+        c1 = _SETUP_BG_COLORS[(self._setup_bg_idx + 1) % len(_SETUP_BG_COLORS)]
+        screen.fill(_lerp_rgb(c0, c1, self._setup_bg_t))
 
     def _layout(self) -> None:
         w, h = self._screen.get_size()
@@ -1916,7 +3189,33 @@ class SetupScreen:
             ),
         ]
 
-        sliders_top = tiles_top + SETUP_TILE_HEIGHT + max(22, int(h * 0.028))
+        cat_gap = max(14, int(h * 0.018))
+        cat_row_top = tiles_top + SETUP_TILE_HEIGHT + cat_gap
+        n_cats = len(_CAT_NAMES)
+        total_pill_w = n_cats * SETUP_CAT_PILL_WIDTH + (n_cats - 1) * SETUP_CAT_PILL_GAP
+        pill_left = w // 2 - total_pill_w // 2
+        self._cat_pill_rects = [
+            pygame.Rect(
+                pill_left + i * (SETUP_CAT_PILL_WIDTH + SETUP_CAT_PILL_GAP),
+                cat_row_top,
+                SETUP_CAT_PILL_WIDTH,
+                SETUP_CAT_PILL_HEIGHT,
+            )
+            for i in range(n_cats)
+        ]
+        n_instrs = len(_INSTRUMENT_NAMES)
+        total_instr_w = n_instrs * SETUP_INSTR_PILL_WIDTH + (n_instrs - 1) * SETUP_INSTR_PILL_GAP
+        instr_left = w // 2 - total_instr_w // 2
+        self._instr_pill_rects = [
+            pygame.Rect(
+                instr_left + i * (SETUP_INSTR_PILL_WIDTH + SETUP_INSTR_PILL_GAP),
+                cat_row_top,           # same Y — mutually exclusive with cat row
+                SETUP_INSTR_PILL_WIDTH,
+                SETUP_INSTR_PILL_HEIGHT,
+            )
+            for i in range(n_instrs)
+        ]
+        sliders_top = cat_row_top + SETUP_CAT_PILL_HEIGHT + cat_gap
         self._sliders = [
             SetupSlider(
                 "Volume",
@@ -1958,6 +3257,21 @@ class SetupScreen:
         self._button_rect.center = (w // 2, btn_cy)
 
         self._footer_hint_y = h - max(18, int(h * 0.022))
+
+        # Pre-bake tile background surfaces (4× AA; avoids per-frame supersampling)
+        tw, th = SETUP_TILE_WIDTH, SETUP_TILE_HEIGHT
+        self._tile_surf_normal = pygame.Surface((tw, th), pygame.SRCALPHA)
+        _aa_rounded_rect(self._tile_surf_normal, SETUP_TILE_BG, (0, 0, tw, th), 16)
+        self._tile_surf_active = pygame.Surface((tw, th), pygame.SRCALPHA)
+        _aa_rounded_rect(self._tile_surf_active, SETUP_ACCENT, (0, 0, tw, th), 16)
+        inner_r = max(1, 16 - SETUP_TILE_BORDER)
+        _aa_rounded_rect(
+            self._tile_surf_active,
+            SETUP_TILE_BG_ACTIVE,
+            (SETUP_TILE_BORDER, SETUP_TILE_BORDER,
+             tw - 2 * SETUP_TILE_BORDER, th - 2 * SETUP_TILE_BORDER),
+            inner_r,
+        )
 
     def _slider_at(self, pos: tuple[int, int]) -> SetupSlider | None:
         for slider in self._sliders:
@@ -2004,7 +3318,29 @@ class SetupScreen:
             tile_hit = self._tile_index_at(event.pos)
             if tile_hit is not None:
                 self._selected_index = tile_hit
+                # tile 0 = Music → show instrument pills; tile 1 = Emoji → show category pills
+                self._instr_target_alpha = 1.0 if tile_hit == 0 else 0.0
+                self._cat_target_alpha   = 1.0 if tile_hit == 1 else 0.0
                 return None
+
+            if self._instr_alpha_factor > 0.05:
+                for i, rect in enumerate(self._instr_pill_rects):
+                    if rect.collidepoint(event.pos):
+                        self._selected_instrument = _INSTRUMENT_KEY[_INSTRUMENT_NAMES[i]]
+                        self._persist_settings()
+                        # Preview: play middle C on the selected instrument
+                        sounds = INSTRUMENT_SOUNDS.get(self._selected_instrument)
+                        if sounds:
+                            sounds[0].set_volume(CURRENT_PLAY_VOLUME)
+                            sounds[0].play()
+                        return None
+
+            if self._cat_alpha_factor > 0.05:
+                for i, rect in enumerate(self._cat_pill_rects):
+                    if rect.collidepoint(event.pos):
+                        self._selected_category = _CAT_NAMES[i]
+                        self._persist_settings()
+                        return None
 
             if (
                 self._selected_index is not None
@@ -2015,6 +3351,8 @@ class SetupScreen:
                     self.volume,
                     self.intensity,
                     self.suppress_notifications,
+                    self._selected_category,
+                    self._selected_instrument,
                 )
 
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
@@ -2024,6 +3362,53 @@ class SetupScreen:
 
         return None
 
+    def _pill_blit_label(
+        self,
+        pill: pygame.Surface,
+        text: str,
+        color: tuple[int, int, int],
+        alpha: int,
+    ) -> None:
+        """Render text centred in pill using font ascent/descent for pixel-perfect V-centre."""
+        label = self._cat_font.render(text, True, color)
+        label.set_alpha(alpha)
+        pw, ph = pill.get_size()
+        # Horizontal: true centre
+        lx = (pw - label.get_width()) // 2
+        # Vertical: centre by actual glyph height, not line-spacing height
+        glyph_h = self._cat_font.get_ascent() + abs(self._cat_font.get_descent())
+        ly = (ph - glyph_h) // 2
+        pill.blit(label, (lx, ly))
+
+    def _draw_category_pills(self, screen: pygame.Surface) -> None:
+        if self._cat_alpha_factor <= 0.01:
+            return
+        alpha = int(round(255 * self._cat_alpha_factor))
+        for rect, name in zip(self._cat_pill_rects, _CAT_NAMES):
+            selected = name == self._selected_category
+            bg = SETUP_ACCENT if selected else SETUP_TILE_BG
+            txt_color = (255, 255, 255) if selected else (140, 140, 155)
+            radius = rect.height // 2
+            pill = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            _aa_rounded_rect(pill, (*bg, alpha), pill.get_rect(), radius)
+            self._pill_blit_label(pill, name, txt_color, alpha)
+            screen.blit(pill, rect.topleft)
+
+    def _draw_instrument_pills(self, screen: pygame.Surface) -> None:
+        if self._instr_alpha_factor <= 0.01:
+            return
+        alpha = int(round(255 * self._instr_alpha_factor))
+        for rect, name in zip(self._instr_pill_rects, _INSTRUMENT_NAMES):
+            key = _INSTRUMENT_KEY[name]
+            selected = key == self._selected_instrument
+            bg = SETUP_ACCENT if selected else SETUP_TILE_BG
+            txt_color = (255, 255, 255) if selected else (140, 140, 155)
+            radius = rect.height // 2
+            pill = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            _aa_rounded_rect(pill, (*bg, alpha), pill.get_rect(), radius)
+            self._pill_blit_label(pill, name, txt_color, alpha)
+            screen.blit(pill, rect.topleft)
+
     def _draw_tile(
         self,
         screen: pygame.Surface,
@@ -2032,18 +3417,14 @@ class SetupScreen:
         *,
         highlighted: bool,
     ) -> None:
-        bg = SETUP_TILE_BG_ACTIVE if highlighted else SETUP_TILE_BG
-        pygame.draw.rect(screen, bg, rect, border_radius=16)
-        if highlighted:
-            pygame.draw.rect(
-                screen,
-                SETUP_ACCENT,
-                rect,
-                width=SETUP_TILE_BORDER,
-                border_radius=16,
-            )
+        bg_surf = self._tile_surf_active if highlighted else self._tile_surf_normal
+        if bg_surf is not None:
+            screen.blit(bg_surf, rect.topleft)
+        else:
+            bg = SETUP_TILE_BG_ACTIVE if highlighted else SETUP_TILE_BG
+            pygame.draw.rect(screen, bg, rect, border_radius=16)
 
-        emoji_surf = self._tile_emoji_font.render(tile.emoji, True, (255, 255, 255))
+        emoji_surf = self._tile_emoji_font.render(tile.emoji, True, tile.emoji_color)
         label_surf = self._tile_label_font.render(tile.label, True, (255, 255, 255))
         subtitle_surf = self._tile_subtitle_font.render(
             tile.subtitle, True, SETUP_SUBTITLE_COLOR
@@ -2088,13 +3469,17 @@ class SetupScreen:
         screen.blit(title_surf, self._title_rect)
 
         tag_surf = self._tagline_font.render(
-            SETUP_TAGLINE_TEXT, True, SETUP_ON_GRADIENT_TEXT_COLOR
+            SETUP_TAGLINE_TEXT, True, (255, 255, 255)
         )
+        tag_surf.set_alpha(216)   # 85 % opacity
         screen.blit(tag_surf, self._tagline_rect)
 
         for i, (tile, rect) in enumerate(zip(_THEME_TILES, self._tile_rects)):
             highlighted = i == self._selected_index or i == self._hovered_index
             self._draw_tile(screen, tile, rect, highlighted=highlighted)
+
+        self._draw_category_pills(screen)
+        self._draw_instrument_pills(screen)
 
         for slider in self._sliders:
             slider.draw(screen)
@@ -2146,8 +3531,9 @@ class SetupScreen:
         self._draw_close_button(screen)
 
         hint_surf = self._footer_font.render(
-            SETUP_FOOTER_HINT_TEXT, True, SETUP_ON_GRADIENT_TEXT_COLOR
+            SETUP_FOOTER_HINT_TEXT, True, (255, 255, 255)
         )
+        hint_surf.set_alpha(216)   # 85 % opacity
         hint_rect = hint_surf.get_rect(
             midbottom=(screen.get_width() // 2, self._footer_hint_y)
         )
@@ -2194,9 +3580,9 @@ def begin_play_session(
     """Create the parent-selected theme and HUD label state."""
     apply_session_volume(config.volume)
     if config.theme_factory is MusicTheme:
-        theme = MusicTheme(screen, NOTE_SOUNDS, config.intensity)
+        theme = MusicTheme(screen, intensity=config.intensity, active_instrument=config.music_instrument)
     else:
-        theme = EmojiTheme(screen, config.intensity)
+        theme = EmojiTheme(screen, config.intensity, config.emoji_category)
     return theme, theme.name, THEME_LABEL_DURATION
 
 
@@ -2209,6 +3595,7 @@ def run_playing_frame(
     keyboard_lockdown: KeyboardLockdown,
     unlock_overlay_font: pygame.font.Font,
     dt: float,
+    mode_pill_font: pygame.font.Font | None = None,
 ) -> tuple[Theme, str, float]:
     """Update and draw one playing frame; returns possibly updated theme/label."""
     current_theme.update(dt)
@@ -2219,6 +3606,10 @@ def run_playing_frame(
     if label_timer > 0:
         draw_theme_label(screen, label_text, hud_font)
         label_timer -= dt
+
+    # Top-left mode indicator (always visible, drawn on top of all effects)
+    if mode_pill_font is not None:
+        draw_mode_pill(screen, current_theme, mode_pill_font)
 
     _draw_unlock_overlay_pill(screen, keyboard_lockdown, unlock_overlay_font)
 
@@ -2280,7 +3671,7 @@ def _reclaim_fullscreen_focus(screen: pygame.Surface, setup_screen: SetupScreen)
 
 
 def main() -> None:
-    global NOTE_SOUNDS, POP_WAVE, _SESSION_CLEANUP_ARGS, _ATEXIT_SESSION_CLEANUP_REGISTERED
+    global NOTE_SOUNDS, INSTRUMENT_SOUNDS, POP_WAVE, _SESSION_CLEANUP_ARGS, _ATEXIT_SESSION_CLEANUP_REGISTERED
 
     pygame.mixer.pre_init(SAMPLE_RATE, -16, 2, 512)
 
@@ -2305,13 +3696,24 @@ def main() -> None:
         pygame.init()
 
         NOTE_SOUNDS = build_note_sounds()
+        INSTRUMENT_SOUNDS.update(build_instrument_sounds())
         POP_WAVE = build_pop_wave()
 
         screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-        pygame.display.set_caption("Toddler Key Smash")
+        pygame.display.set_caption("Keyboard Masher")
+        # Set the window/taskbar icon from icon.png if it exists next to main.py
+        _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
+        if os.path.isfile(_icon_path):
+            _icon_surf = pygame.image.load(_icon_path).convert_alpha()
+            pygame.display.set_icon(_icon_surf)
         clock = pygame.time.Clock()
         hud_font = pygame.font.SysFont(UI_FONT_NAME, 28)
+        mode_pill_font = pygame.font.SysFont(UI_FONT_NAME, 15)
         unlock_overlay_font = pygame.font.SysFont(UI_FONT_NAME, 18)
+        stress_hud_font = pygame.font.SysFont(UI_FONT_NAME, 22)
+        stress_big_font = pygame.font.SysFont(UI_FONT_NAME, 72, bold=True)
+        stress_med_font = pygame.font.SysFont(UI_FONT_NAME, 28)
+        stress_sm_font = pygame.font.SysFont(UI_FONT_NAME, 20)
 
         app_state = AppState.SETUP
         setup_screen = SetupScreen(screen)
@@ -2319,6 +3721,8 @@ def main() -> None:
         label_text = ""
         label_timer = 0.0
         foreground_check_accumulator = 0.0
+        stress_runner: StressTestRunner | None = None
+        stress_result: StressTestResult | None = None
 
         running = True
         while running:
@@ -2334,6 +3738,23 @@ def main() -> None:
                     and app_state == AppState.SETUP
                 ):
                     running = False
+
+                elif (
+                    event.type == pygame.KEYDOWN
+                    and event.key == pygame.K_F7
+                    and app_state == AppState.SETUP
+                ):
+                    stress_runner = StressTestRunner(
+                        screen, setup_screen.selected_theme_factory
+                    )
+                    app_state = AppState.STRESS_TEST
+
+                elif (
+                    event.type == pygame.KEYDOWN
+                    and app_state == AppState.STRESS_RESULTS
+                ):
+                    app_state = AppState.SETUP
+                    stress_result = None
 
                 elif app_state == AppState.SETUP:
                     session = setup_screen.handle_event(event)
@@ -2367,6 +3788,22 @@ def main() -> None:
                     label_timer = 0.0
                 else:
                     for key in keyboard_lockdown.drain():
+                        if key == pygame.K_F7:
+                            leave_playing_state(
+                                notification_suppressor,
+                                keyboard_lockdown,
+                                win_key_suppressor,
+                                lock_workstation_suppressor,
+                                accessibility_keys_suppressor,
+                            )
+                            factory = type(current_theme)
+                            current_theme.clear()
+                            current_theme = None
+                            label_text = ""
+                            label_timer = 0.0
+                            stress_runner = StressTestRunner(screen, factory)
+                            app_state = AppState.STRESS_TEST
+                            break
                         current_theme, label_text, label_timer = handle_playing_key(
                             key, screen, current_theme, label_text, label_timer
                         )
@@ -2390,7 +3827,23 @@ def main() -> None:
                         except OSError:
                             pass
 
-            if app_state == AppState.SETUP:
+            if app_state == AppState.STRESS_TEST and stress_runner is not None:
+                stress_runner.update(dt)
+                stress_runner.draw(screen)
+                draw_stress_test_hud(screen, stress_runner, stress_hud_font)
+                stress_runner.measure(screen)
+                if stress_runner.done:
+                    stress_result = stress_runner.finish()
+                    write_stress_log(stress_result)
+                    stress_runner = None
+                    app_state = AppState.STRESS_RESULTS
+            elif app_state == AppState.STRESS_RESULTS and stress_result is not None:
+                screen.fill(BACKGROUND_COLOR)
+                draw_stress_results(
+                    screen, stress_result,
+                    stress_big_font, stress_med_font, stress_sm_font,
+                )
+            elif app_state == AppState.SETUP:
                 setup_screen.tick(dt)
                 setup_screen.draw(screen)
             elif current_theme is not None:
@@ -2403,6 +3856,7 @@ def main() -> None:
                     keyboard_lockdown,
                     unlock_overlay_font,
                     dt,
+                    mode_pill_font,
                 )
 
             pygame.display.flip()
