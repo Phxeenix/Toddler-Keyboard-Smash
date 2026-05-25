@@ -1,52 +1,17 @@
+# PyInstaller output
+dist/
+build/
+*.spec.bak
+
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 
-# Virtual environment
+# Virtual environments
 venv/
-
-# PyInstaller output
-build/
-dist/
-*.spec
-!ToddlerKeyboardSmash.spec
-
-# Dev checkpoint files
-main_phase*.py
-
-# App settings (user-specific)
-settings.json
-
-# Dev-mode palette overrides (only present when KEYBOARD_MASHER_DEV=1)
-dev_palette.json
-
-# Hard-kill recovery sentinel — present only between session start and clean exit
-.session_dirty
-
-# Dev-mode persistent logs (only present when KEYBOARD_MASHER_DEV=1)
-logs/
+.venv/
 
 # OS
-Thumbs.db
 .DS_Store
-
-# Session / tool scratch (per-machine, not for the repo)
-claude-code-handoff.md
-.playwright-cli/
-
-# GSD planning directory (kept local only)
-.planning/
-
-# V2 working plan + source specs (kept local only)
-v2-merged-plan.md
-v2-phase-1-dynamic-backgrounds.md
-v2-phases-2-3-4.md
-
-# Local-only project docs (CLAUDE.md is AI agent instructions, others are stray)
-CLAUDE.md
-notes.md
-main - Copy.py
-
-# Local-only incident notes
-data-loss-notes.md
+Thumbs.db
